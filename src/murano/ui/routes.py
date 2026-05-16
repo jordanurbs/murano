@@ -15,6 +15,7 @@ from fastapi.templating import Jinja2Templates
 
 from ..config import Settings, get_api_key, load_settings
 from ..index import db as chunks_db
+from ..security import VaultPathError, safe_vault_path
 from ..tree import retrieve as tree_retrieve
 
 router = APIRouter()
@@ -84,10 +85,10 @@ def page_settings(request: Request, settings: Settings = Depends(get_settings)):
 @router.get("/file", response_class=HTMLResponse)
 def page_file(path: str, request: Request, settings: Settings = Depends(get_settings)):
     """Render a single vault file (used by the browser side panel)."""
-    candidate = (settings.vault_root / path).resolve()
-    vault_root = settings.vault_root.resolve()
-    if not str(candidate).startswith(str(vault_root)):
-        raise HTTPException(status_code=400, detail="Path is outside the vault.")
+    try:
+        candidate = safe_vault_path(settings.vault_root, path)
+    except VaultPathError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     if not candidate.exists() or not candidate.is_file():
         raise HTTPException(status_code=404, detail=f"File not found: {path}")
     try:

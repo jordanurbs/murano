@@ -56,9 +56,13 @@ Codex CLI's MCP config follows the same standard shape. Merge in [`codex-cli/mcp
 
 Hermes uses Markdown-based skill files. [`hermes/murano-skill.md`](./hermes/murano-skill.md) is a ready-to-drop-in skill with YAML frontmatter describing both transports (HTTP at `http://localhost:3000/api/v1/*` and MCP over stdio) and a Markdown body explaining when to call each tool, the calling conventions, and failure modes. Copy it into your Hermes skills directory and reference it by name.
 
+**Important:** the skill file's `mcp.command` field uses an `/ABSOLUTE/PATH/TO/.venv/bin/murano` placeholder, not bare `murano`. Hermes host processes often don't inherit your shell `PATH`, so a bare command can break silently. Find your binary with `which murano` and paste the absolute path.
+
 ## OpenClaw
 
 OpenClaw expects YAML skill manifests. [`openclaw/murano-skill.yaml`](./openclaw/murano-skill.yaml) describes the same five tools with input schemas, transport choices, and the `cite-everything / themes-are-context / don't-write-outside-vault` conventions Murano expects from callers. Adapt the shape if OpenClaw's manifest schema diverges in your version.
+
+Same `PATH` caveat as the Hermes skill: the `mcp.command` field is an absolute-path placeholder — substitute the output of `which murano` before loading.
 
 ## Other MCP-aware hosts
 

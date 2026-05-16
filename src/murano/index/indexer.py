@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..config import Settings
+from ..security import VaultPathError, relpath_in_vault
 from ..vault.chunker import (
     DEFAULT_OVERLAP_TOKENS,
     DEFAULT_TARGET_TOKENS,
@@ -48,31 +49,52 @@ class IndexReport:
 def iter_vault_files(vault_root: Path, subpath: Path | None = None) -> Iterable[Path]:
     """Yield Markdown files under the vault, optionally restricted to subpath.
 
-    Hidden directories (starting with ".") are skipped. Symlinks are followed
-    only one level (we resolve and then proceed); we don't try to detect cycles.
+    Both `vault_root` and the per-file check operate on resolved paths to
+    handle macOS's `/var` -> `/private/var` symlink. We never follow
+    symlinks that escape the vault: any yielded path is verified to be a
+    real descendant of the resolved vault root.
     """
-    base = (vault_root / subpath).resolve() if subpath else vault_root.resolve()
+    vault_resolved = vault_root.resolve()
+    base = (vault_resolved / subpath).resolve() if subpath else vault_resolved
     if not base.exists():
         return
+    # Refuse to walk a subpath that points outside the vault (e.g. via `..`).
+    try:
+        base.relative_to(vault_resolved)
+    except ValueError:
+        return
+
     if base.is_file():
         if any(base.match(g) for g in MARKDOWN_GLOBS):
             yield base
         return
+
     for path in sorted(base.rglob("*")):
         if not path.is_file():
             continue
-        if any(part.startswith(".") for part in path.relative_to(vault_root).parts):
+        # Resolve each candidate and verify it really lives under the vault.
+        # If a symlink in the vault points outside, this discards the target.
+        try:
+            resolved = path.resolve()
+            rel = resolved.relative_to(vault_resolved)
+        except (OSError, ValueError):
             continue
-        if not any(path.match(g) for g in MARKDOWN_GLOBS):
+        if any(part.startswith(".") for part in rel.parts):
             continue
-        yield path
+        if not any(resolved.match(g) for g in MARKDOWN_GLOBS):
+            continue
+        yield resolved
 
 
 def _relpath(vault_root: Path, p: Path) -> str:
-    try:
-        return str(p.resolve().relative_to(vault_root.resolve()))
-    except ValueError:
-        return str(p)
+    """Vault-relative POSIX path for a file. Raises VaultPathError on escape.
+
+    The prior silent absolute-path fallback was a latent leak: any path
+    that slipped past the walker would end up as an absolute citation key.
+    Per the security audit we now refuse to invent a relpath outside the
+    vault — callers must skip the file instead.
+    """
+    return relpath_in_vault(vault_root, p)
 
 
 def index_vault(
@@ -125,8 +147,18 @@ def index_vault(
         seen_relpaths: set[str] = set()
 
         for fpath in iter_vault_files(settings.vault_root, subpath):
+            try:
+                relpath = _relpath(settings.vault_root, fpath)
+            except VaultPathError as e:
+                # Defensive: iter_vault_files already filters these, but if a
+                # racy filesystem change moves the target between yield and
+                # use, we'd rather skip than leak an absolute path into a
+                # citation key.
+                report.errors.append(
+                    FileResult(relpath=str(fpath), chunks=0, status="error", error=str(e))
+                )
+                continue
             report.files_seen += 1
-            relpath = _relpath(settings.vault_root, fpath)
             seen_relpaths.add(relpath)
 
             try:
@@ -207,7 +239,12 @@ def index_vault(
                 progress(fr)
 
         # Prune any files that vanished from the vault (within the index scope).
-        scope_rel = _relpath(settings.vault_root, scope_path)
+        try:
+            scope_rel = _relpath(settings.vault_root, scope_path)
+        except VaultPathError:
+            # Subpath was outside the vault — iter_vault_files already
+            # yielded nothing, so there is nothing scoped to prune.
+            scope_rel = ""
         scope_prefix = "" if scope_rel in (".", "") else scope_rel.rstrip("/") + "/"
         for known in dbmod.list_file_paths(conn):
             if scope_prefix and not (known == scope_rel or known.startswith(scope_prefix)):

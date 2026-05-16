@@ -2,11 +2,13 @@
 
 > Private, local-first personal knowledge base. Chat with your Markdown vault. Powered by [Venice](https://venice.ai).
 
-**Status:** Phase 1 — skeleton + Venice plumbing.
+**Status:** v1 feature-complete — all 7 plan phases shipped.
 
 Murano is a clean-room rebuild of the "memory tree" concept. You drop Markdown files into a vault (Obsidian-compatible), Murano chunks, embeds, and indexes them, then lets you chat with your knowledge through a CLI, a local web UI on port 3000, or an MCP server that any agent framework (Claude Desktop, Cursor, Hermes, OpenClaw, Codex CLI) can plug into.
 
-No backend service. No telemetry. The only outbound call is to `api.venice.ai`.
+No backend service. No telemetry. By default the only outbound call is to `api.venice.ai`. Two narrowly-scoped exceptions exist by design:
+- `murano capture <url>` / `capture-feed <url>` fetches user-supplied URLs.
+- `MURANO_VENICE_BASE_URL` lets advanced users point at any OpenAI-compatible endpoint (Ollama, vLLM, LM Studio). When that's set, Murano **never** sends the keychain Venice API key — you must provide `MURANO_API_KEY` for the local endpoint, or leave it unset for no-auth servers.
 
 ## Install (dev)
 

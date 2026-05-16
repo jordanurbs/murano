@@ -1,8 +1,16 @@
 """Venice API client.
 
 Murano talks to Venice through the official `openai` SDK with the base URL
-swapped to `https://api.venice.ai/api/v1`. This is the ONLY outbound network
-target Murano is allowed to contact.
+pointed at `https://api.venice.ai/api/v1`. By default that is the ONLY
+outbound network target Murano contacts.
+
+`MURANO_VENICE_BASE_URL` lets advanced users point at any OpenAI-compatible
+endpoint (Ollama, LM Studio, vLLM, etc.). When the base URL is anything
+other than the canonical Venice host, Murano **does not** read the Venice
+key from the OS keychain — that key may only flow to api.venice.ai. For
+custom endpoints, set `MURANO_API_KEY` explicitly (or leave empty for
+no-auth local servers). This closes the audit-found leak where a tampered
+env could exfiltrate the keychain key to an arbitrary host.
 
 Venice's `/v1/models` endpoint accepts a `type` query parameter
 (`text` | `embedding` | `image` | `tts` | `upscale`). The OpenAI SDK doesn't
@@ -12,13 +20,21 @@ all actual chat/embedding requests still flow through the OpenAI client.
 
 from __future__ import annotations
 
+import logging
+import os
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 from openai import OpenAI
 
 from .config import Settings, get_api_key
+
+CANONICAL_VENICE_HOST = "api.venice.ai"
+LOCAL_API_KEY_ENV = "MURANO_API_KEY"
+
+_logger = logging.getLogger("murano.venice")
 
 
 class VeniceAuthError(RuntimeError):
@@ -27,6 +43,45 @@ class VeniceAuthError(RuntimeError):
 
 class VeniceConnectionError(RuntimeError):
     """Raised when Venice cannot be reached or returns an error."""
+
+
+def _is_canonical_venice(base_url: str) -> bool:
+    """Whether base_url points at the real api.venice.ai host (case-insensitive)."""
+    try:
+        host = urlparse(base_url).hostname or ""
+    except (ValueError, AttributeError):
+        return False
+    return host.lower() == CANONICAL_VENICE_HOST
+
+
+def resolve_api_key(settings: Settings) -> str:
+    """Return the API key safe to send to `settings.venice_base_url`.
+
+    - If the base URL is the canonical api.venice.ai: use the keychain key.
+      Raise VeniceAuthError when missing — Murano needs auth there.
+    - Otherwise: use the `MURANO_API_KEY` env var if set, else an empty
+      string. The keychain Venice key is NEVER sent to a non-Venice host.
+    """
+    if _is_canonical_venice(settings.venice_base_url):
+        key = get_api_key()
+        if not key:
+            raise VeniceAuthError(
+                "No Venice API key found in the OS keychain. "
+                "Run `murano config set-key` to store one."
+            )
+        return key
+
+    # Custom (non-Venice) base URL. Refuse to leak the keychain key.
+    override = os.environ.get(LOCAL_API_KEY_ENV, "")
+    if not override:
+        _logger.warning(
+            "Using non-Venice base URL %s with no %s set; sending empty Bearer.",
+            settings.venice_base_url,
+            LOCAL_API_KEY_ENV,
+        )
+    # OpenAI SDK requires a non-empty string; spaces work fine as a placeholder
+    # for local servers that accept any token (Ollama, llama.cpp).
+    return override or "no-auth"
 
 
 @dataclass
@@ -49,28 +104,25 @@ class ResolvedModels:
 
 
 def build_client(settings: Settings) -> OpenAI:
-    """Construct an OpenAI client pointed at Venice, using the keychain API key."""
-    api_key = get_api_key()
-    if not api_key:
-        raise VeniceAuthError(
-            "No Venice API key found in the OS keychain. "
-            "Run `murano config set-key` to store one."
-        )
+    """Construct an OpenAI client pointed at the configured endpoint.
+
+    The keychain Venice key is only used when the base URL is api.venice.ai.
+    For any other endpoint, MURANO_API_KEY is used (or an empty placeholder).
+    """
+    api_key = resolve_api_key(settings)
     return OpenAI(api_key=api_key, base_url=settings.venice_base_url)
 
 
 def _http_get_models(settings: Settings, type_filter: str | None) -> list[dict[str, Any]]:
-    """Call Venice's `/v1/models` directly so we can pass `?type=<filter>`.
+    """Call `/v1/models` directly so we can pass `?type=<filter>`.
 
     Returns the raw `data` array (list of model dicts) so callers can read
     Venice-specific fields like `model_spec.embeddingDimensions`.
+
+    Non-Venice endpoints may or may not implement `?type=...`; if they
+    return everything we still get a usable list.
     """
-    api_key = get_api_key()
-    if not api_key:
-        raise VeniceAuthError(
-            "No Venice API key found in the OS keychain. "
-            "Run `murano config set-key` to store one."
-        )
+    api_key = resolve_api_key(settings)
     params = {"type": type_filter} if type_filter else {}
     try:
         resp = httpx.get(
@@ -81,7 +133,7 @@ def _http_get_models(settings: Settings, type_filter: str | None) -> list[dict[s
         )
         resp.raise_for_status()
     except httpx.HTTPError as e:
-        raise VeniceConnectionError(f"Failed to reach Venice /v1/models: {e}") from e
+        raise VeniceConnectionError(f"Failed to reach /v1/models: {e}") from e
     payload = resp.json()
     return list(payload.get("data", []))
 

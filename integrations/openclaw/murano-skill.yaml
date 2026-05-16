@@ -24,7 +24,9 @@ transports:
     openapi_url: http://localhost:3000/openapi.json
   mcp:
     type: stdio
-    command: murano
+    # Use an ABSOLUTE path here. OpenClaw host processes don't always inherit
+    # your shell PATH. Find yours with: `which murano`.
+    command: /ABSOLUTE/PATH/TO/.venv/bin/murano
     args: [mcp]
     env:
       # Optional: override defaults if the user keeps their vault elsewhere.

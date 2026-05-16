@@ -12,7 +12,10 @@ transports:
   http:
     base_url: http://localhost:3000/api/v1
   mcp:
-    command: murano
+    # Use an ABSOLUTE path here. Hermes host processes don't always inherit
+    # your shell PATH (same caveat as Claude Desktop / Cursor MCP configs).
+    # Find yours with: `which murano`
+    command: /ABSOLUTE/PATH/TO/.venv/bin/murano
     args: [mcp]
 tags: [memory, rag, knowledge-base, local-first]
 ---

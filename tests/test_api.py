@@ -349,11 +349,36 @@ def test_capture_endpoint_writes_and_indexes(client: TestClient, vault_env: Sett
 
 
 def test_open_rejects_path_outside_vault(client: TestClient) -> None:
+    """Traversal must return 400 specifically (not 400-OR-404 — that masked
+    the prefix-bypass bug found in the audit)."""
     r = client.post("/api/v1/open", json={"path": "../../../etc/passwd"})
-    assert r.status_code in (400, 404)
+    assert r.status_code == 400, r.text
 
 
-def test_open_404_for_missing_file(client: TestClient) -> None:
+def test_open_rejects_sibling_prefix_bypass(
+    client: TestClient, vault_env: Settings
+) -> None:
+    """`vault` vs `vault2` sibling test: the prior `str.startswith(vault_root)`
+    check let `../vault2/x.md` through because the resolved path started with
+    the vault root string. Now we use `Path.relative_to` which catches it."""
+    sibling = vault_env.vault_root.parent / "vault2"
+    sibling.mkdir(exist_ok=True)
+    secret = sibling / "secret.md"
+    secret.write_text("you should not be able to open me")
+
+    r = client.post("/api/v1/open", json={"path": "../vault2/secret.md"})
+    assert r.status_code == 400, r.text
+    assert "outside" in r.json()["detail"].lower()
+
+
+def test_open_rejects_absolute_path(client: TestClient) -> None:
+    r = client.post("/api/v1/open", json={"path": "/etc/passwd"})
+    # absolute paths inside vault_root that don't exist -> 400 (outside),
+    # but here /etc/passwd resolves outside the vault and must be 400.
+    assert r.status_code == 400
+
+
+def test_open_404_for_missing_file_inside_vault(client: TestClient) -> None:
     r = client.post("/api/v1/open", json={"path": "does/not/exist.md"})
     assert r.status_code == 404
 
@@ -382,7 +407,25 @@ def test_vault_file_returns_content(client: TestClient) -> None:
 
 def test_vault_file_rejects_traversal(client: TestClient) -> None:
     r = client.get("/api/v1/vault/file?path=../../../etc/passwd")
-    assert r.status_code in (400, 404)
+    assert r.status_code == 400, r.text
+    assert "outside" in r.json()["detail"].lower()
+
+
+def test_vault_file_rejects_sibling_prefix_bypass(
+    client: TestClient, vault_env: Settings
+) -> None:
+    """Sibling-prefix attack: previously `str.startswith` let `../vault2/x.md`
+    through. Verified to be a real exploit during the audit; this test
+    locks the fix."""
+    sibling = vault_env.vault_root.parent / "vault2"
+    sibling.mkdir(exist_ok=True)
+    secret = sibling / "secret.md"
+    secret.write_text("you should not be able to read me via /api/v1/vault/file")
+
+    r = client.get("/api/v1/vault/file?path=../vault2/secret.md")
+    assert r.status_code == 400, r.text
+    # Confirm we did NOT leak the secret into the response body.
+    assert "you should not be able to read me" not in r.text
 
 
 # --------- UI pages render ---------

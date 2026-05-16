@@ -37,6 +37,7 @@ from ..chat.retriever import Retriever
 from ..config import Settings, get_api_key, load_settings
 from ..index import db as chunks_db
 from ..index.indexer import index_vault
+from ..security import VaultPathError, safe_vault_path
 from ..tree import retrieve as tree_retrieve
 from ..venice import VeniceAuthError, VeniceConnectionError, resolve_models
 from . import schemas
@@ -195,10 +196,10 @@ def open_file(body: schemas.OpenRequest, settings: Settings = Depends(get_settin
     This intentionally rejects absolute paths and any path that resolves
     outside the vault root — we don't want to be a generic file opener.
     """
-    candidate = (settings.vault_root / body.path).resolve()
-    vault_root = settings.vault_root.resolve()
-    if not str(candidate).startswith(str(vault_root)):
-        raise HTTPException(status_code=400, detail="Path is outside the vault.")
+    try:
+        candidate = safe_vault_path(settings.vault_root, body.path)
+    except VaultPathError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     if not candidate.exists() or not candidate.is_file():
         raise HTTPException(status_code=404, detail=f"File not found: {body.path}")
 
@@ -429,10 +430,10 @@ def vault_tree(settings: Settings = Depends(get_settings)):
 @router.get("/vault/file")
 def vault_file(path: str, settings: Settings = Depends(get_settings)):
     """Return the raw text of a vault-relative Markdown file."""
-    candidate = (settings.vault_root / path).resolve()
-    vault_root = settings.vault_root.resolve()
-    if not str(candidate).startswith(str(vault_root)):
-        raise HTTPException(status_code=400, detail="Path is outside the vault.")
+    try:
+        candidate = safe_vault_path(settings.vault_root, path)
+    except VaultPathError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     if not candidate.exists() or not candidate.is_file():
         raise HTTPException(status_code=404, detail=f"File not found: {path}")
     try:
