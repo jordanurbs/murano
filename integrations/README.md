@@ -2,13 +2,13 @@
 
 Drop-in configuration snippets so agent frameworks can use Murano as their persistent memory layer via the Model Context Protocol (MCP).
 
-The Murano MCP server exposes three tools today:
+The Murano MCP server exposes five tools today:
 
 - `search_kb(query, k=10)` — vector search over your vault; returns the top-K Markdown chunks with `[[file#heading]]` citation keys. No LLM call. Cheap, fast.
-- `ask_kb(query, k=6, max_tokens=1024, temperature=0.2)` — full RAG. Retrieves chunks, asks the configured Venice chat model to answer grounded only in those chunks, with inline `[[file#heading]]` citations.
+- `ask_kb(query, k=6, max_tokens=1024, temperature=0.2)` — full RAG. Retrieves chunks plus the top summary-tree themes, asks the configured Venice chat model to answer grounded only in those chunks, with inline `[[file#heading]]` citations. Themes are used as context (orientation), never cited.
 - `capture_url(url, tags=[])` — fetches a web page with `trafilatura`, writes a Markdown file with YAML frontmatter into `<vault>/web-captures/YYYY-MM-DD-<slug>.md`, and immediately indexes it so subsequent `search_kb` / `ask_kb` calls can cite it.
-
-More tools land in later phases: `list_themes` and `get_chunk` (Phase 5).
+- `list_themes(level=1)` — walks the hierarchical summary tree; returns every cluster's title + 3-5 sentence summary + member count. Useful for orienting an agent before deciding what to ask.
+- `get_chunk(chunk_id)` — fetches a single chunk by its id (e.g. `cooking/risotto.md::2`) for follow-ups after a `search_kb` or `ask_kb` Sources footer.
 
 ## Prerequisites (one-time)
 

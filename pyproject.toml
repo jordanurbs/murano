@@ -33,13 +33,13 @@ dependencies = [
     "mcp>=1.0.0",
     # Phase 4: web capture
     "trafilatura>=1.12.0",
+    # Phase 5: hierarchical tree (k-means via numpy, no sklearn)
+    "numpy>=1.26.0",
 ]
 
 [project.optional-dependencies]
-# Phase 5: hierarchical tree + scheduling
-tree = [
-    "numpy>=1.26.0",
-    "scikit-learn>=1.4.0",
+# Phase 6: scheduled jobs (nightly tree rebuild via `murano serve`)
+schedule = [
     "apscheduler>=3.10.0",
 ]
 # Phase 6: web UI + REST API

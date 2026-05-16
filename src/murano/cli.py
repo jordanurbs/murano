@@ -40,6 +40,13 @@ config_app = typer.Typer(
 )
 app.add_typer(config_app, name="config")
 
+tree_app = typer.Typer(
+    name="tree",
+    help="Manage the hierarchical summary tree (the \"memory tree\").",
+    no_args_is_help=True,
+)
+app.add_typer(tree_app, name="tree")
+
 console = Console()
 err_console = Console(stderr=True, style="bold red")
 
@@ -438,18 +445,31 @@ def ask(
             if ev.kind == "retrieval":
                 retrieval = ev.retrieval
                 hit_count = len(retrieval.hits) if retrieval else 0
+                summary_count = len(retrieval.summaries) if retrieval else 0
+                summary_str = (
+                    f" + {summary_count} theme(s)" if summary_count else ""
+                )
                 console.print(
-                    f"[dim]Retrieved {hit_count} chunks in "
+                    f"[dim]Retrieved {hit_count} chunks{summary_str} in "
                     f"{retrieval.elapsed_ms:.0f} ms "
                     f"(embed={retrieval.embed_model}, chat={retrieval.chat_model})[/]"
                 )
-                if show_context and retrieval and retrieval.hits:
-                    for i, h in enumerate(retrieval.hits, start=1):
-                        console.print(
-                            f"  [cyan]{i}.[/] {h.file_path}"
-                            + (f" [dim]\u2014 {h.heading_path}[/]" if h.heading_path else "")
-                            + f"  [dim]distance={h.distance:.4f}[/]"
-                        )
+                if show_context and retrieval:
+                    if retrieval.summaries:
+                        console.print("  [bold]Themes:[/]")
+                        for s in retrieval.summaries:
+                            console.print(
+                                f"    [magenta]\u2022[/] {s.title} "
+                                f"[dim]({s.member_count} notes, distance={s.distance:.4f})[/]"
+                            )
+                    if retrieval.hits:
+                        console.print("  [bold]Chunks:[/]")
+                        for i, h in enumerate(retrieval.hits, start=1):
+                            console.print(
+                                f"    [cyan]{i}.[/] {h.file_path}"
+                                + (f" [dim]\u2014 {h.heading_path}[/]" if h.heading_path else "")
+                                + f"  [dim]distance={h.distance:.4f}[/]"
+                            )
                 console.print()
             elif ev.kind == "delta" and ev.text:
                 answer_chars.append(ev.text)
@@ -573,6 +593,132 @@ def serve(
 ) -> None:
     """Run the local web UI + REST API on http://localhost:3000. (Phase 6)"""
     _not_yet("Phase 6", "serve")
+
+
+@tree_app.command("rebuild")
+def tree_rebuild(
+    max_levels: int = typer.Option(
+        3, "--max-levels", help="Maximum levels of summary clustering to build."
+    ),
+    min_cluster_size: int = typer.Option(
+        5,
+        "--min-cluster-size",
+        help="Stop building when fewer than this many items remain at a level.",
+    ),
+    seed: int = typer.Option(
+        0, "--seed", help="Random seed for k-means initialization (for reproducibility)."
+    ),
+) -> None:
+    """(Re)build the summary tree from the current chunks index."""
+    from .tree.build import build_tree
+
+    settings = load_settings()
+    if not settings.chunks_db.exists():
+        err_console.print(
+            f"No index found at [bold]{settings.chunks_db}[/]. "
+            "Run [bold]murano index[/] first."
+        )
+        raise typer.Exit(code=1)
+
+    def progress(msg: str) -> None:
+        console.print(f"[dim]{msg}[/]")
+
+    try:
+        report = build_tree(
+            settings,
+            max_levels=max_levels,
+            min_cluster_size=min_cluster_size,
+            seed=seed,
+            progress=progress,
+        )
+    except VeniceAuthError as e:
+        err_console.print(str(e))
+        raise typer.Exit(code=2) from e
+    except VeniceConnectionError as e:
+        err_console.print(str(e))
+        raise typer.Exit(code=3) from e
+
+    if report.skipped_reason:
+        err_console.print(f"[yellow]Tree not built:[/] {report.skipped_reason}")
+        raise typer.Exit(code=4)
+
+    table = Table(title="Tree built", show_header=False, header_style="bold cyan")
+    table.add_column("metric", style="dim")
+    table.add_column("value")
+    table.add_row("source chunks", str(report.source_chunk_count))
+    table.add_row("total nodes", str(report.total_nodes))
+    table.add_row("total edges", str(report.total_edges))
+    table.add_row("embed model", str(report.embed_model))
+    table.add_row("chat model", str(report.chat_model))
+    table.add_row("elapsed", f"{report.elapsed_seconds:.2f}s")
+    console.print(table)
+
+    if report.levels:
+        levels = Table(title="Per-level stats", header_style="bold cyan")
+        levels.add_column("level")
+        levels.add_column("inputs")
+        levels.add_column("k (clusters)")
+        levels.add_column("summary calls")
+        levels.add_column("elapsed")
+        for s in report.levels:
+            levels.add_row(
+                str(s.level),
+                str(s.inputs),
+                str(s.k),
+                str(s.summary_calls),
+                f"{s.elapsed_seconds:.2f}s",
+            )
+        console.print(levels)
+
+
+@tree_app.command("show")
+def tree_show(
+    level: int | None = typer.Option(
+        None, "--level", help="Only print nodes at this level (default: all)."
+    ),
+) -> None:
+    """Print the current summary tree (titles + summaries)."""
+    from rich.markup import escape
+
+    from .tree.retrieve import list_themes, status
+
+    settings = load_settings()
+    st = status(settings)
+    if not st.exists:
+        err_console.print("[yellow]No summary tree built yet.[/] Run [bold]murano tree rebuild[/].")
+        if st.current_chunk_count == 0:
+            err_console.print("  (your index is also empty — start with [bold]murano index[/])")
+        raise typer.Exit(code=1)
+
+    header = Table(title="Summary tree", show_header=False, header_style="bold cyan")
+    header.add_column("metric", style="dim")
+    header.add_column("value")
+    header.add_row("nodes", str(st.node_count))
+    header.add_row("levels", ", ".join(str(lv) for lv in st.levels))
+    header.add_row("source chunks (at build time)", str(st.source_chunk_count))
+    header.add_row("current chunks", str(st.current_chunk_count))
+    header.add_row("embed model", st.embed_model or "?")
+    header.add_row("chat model", st.chat_model or "?")
+    if st.is_stale:
+        header.add_row("status", f"[yellow]stale[/]: {st.stale_reason}")
+    else:
+        header.add_row("status", "[green]fresh[/]")
+    console.print(header)
+
+    levels_to_print = [level] if level is not None else list(st.levels)
+    for lv in levels_to_print:
+        nodes = list_themes(settings, level=lv)
+        if not nodes:
+            console.print(f"\n[dim]Level {lv}: no nodes[/]")
+            continue
+        console.print(f"\n[bold]Level {lv}[/] ({len(nodes)} nodes)")
+        for n in nodes:
+            console.print(
+                f"  [cyan]{escape(n.id)}[/] [bold]{escape(n.title)}[/]  "
+                f"[dim]({n.member_count} members)[/]"
+            )
+            for line in n.summary.splitlines():
+                console.print(f"    [dim]{escape(line)}[/]")
 
 
 @app.command()

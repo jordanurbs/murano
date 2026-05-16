@@ -12,10 +12,8 @@ Tools exposed (per MURANO_PLAN.md §10):
     - capture_url(url, tags) : fetch a URL with trafilatura and write a
                                Markdown file with YAML frontmatter into the
                                vault; auto-indexes the new chunks
-
-Tools deferred to later phases:
-    - list_themes(level=1)   : Phase 5 (summary tree)
-    - get_chunk(id)          : Phase 5
+    - list_themes(level=1)   : walk the summary tree at a given level
+    - get_chunk(chunk_id)    : fetch a single chunk by id from chunks.db
 
 Logging discipline: MCP uses stdout for protocol messages, so all human-facing
 logs go to stderr. The CLI wrapper sets that up before calling main().
@@ -38,6 +36,9 @@ from ..chat.answer import StreamConfig, collect_answer, extract_citation_keys
 from ..chat.retriever import Retriever
 from ..config import load_settings
 from ..index.indexer import index_vault
+from ..tree.retrieve import get_chunk as tree_get_chunk
+from ..tree.retrieve import list_themes as tree_list_themes
+from ..tree.retrieve import status as tree_status
 from ..venice import VeniceAuthError, VeniceConnectionError
 
 SERVER_NAME = "murano"
@@ -160,6 +161,53 @@ def _build_server() -> Server:
                     "required": ["url"],
                 },
             ),
+            types.Tool(
+                name="list_themes",
+                title="List vault themes (summary tree)",
+                description=(
+                    "Walk the Murano summary tree at a given level. Returns "
+                    "every cluster summary (title + 3-5 sentence summary + "
+                    "member count). Useful to orient an agent before deciding "
+                    "what to ask about. Returns an empty list if no tree has "
+                    "been built (run `murano tree rebuild`)."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "level": {
+                            "type": "integer",
+                            "description": (
+                                "Which level to list. Level 1 is the most "
+                                "granular (clusters of chunks). Higher levels "
+                                "are clusters of summaries. Default: 1."
+                            ),
+                            "default": 1,
+                            "minimum": 1,
+                            "maximum": 6,
+                        },
+                    },
+                },
+            ),
+            types.Tool(
+                name="get_chunk",
+                title="Get a specific chunk by id",
+                description=(
+                    "Fetch the full content + heading path of a single chunk "
+                    "from the vault index. `chunk_id` has the form "
+                    "`<file-relpath>::<ord>`, as returned by `search_kb` hits "
+                    "and `ask_kb` Sources footers."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "chunk_id": {
+                            "type": "string",
+                            "description": "The chunk id, e.g. `cooking/risotto.md::2`.",
+                        },
+                    },
+                    "required": ["chunk_id"],
+                },
+            ),
         ]
 
     @app.call_tool()
@@ -175,6 +223,10 @@ def _build_server() -> Server:
                 return _tool_ask(arguments)
             if name == "capture_url":
                 return _tool_capture(arguments)
+            if name == "list_themes":
+                return _tool_list_themes(arguments)
+            if name == "get_chunk":
+                return _tool_get_chunk(arguments)
             raise ValueError(f"Unknown tool: {name!r}")
         except VeniceAuthError as e:
             raise RuntimeError(f"Murano is not configured: {e}") from e
@@ -335,6 +387,97 @@ def _tool_capture(arguments: dict[str, Any]) -> list[types.TextContent]:
     )
     return [
         types.TextContent(type="text", text="\n".join(text_lines)),
+        types.TextContent(type="text", text=structured),
+    ]
+
+
+def _tool_list_themes(arguments: dict[str, Any]) -> list[types.TextContent]:
+    level = _coerce_int(arguments.get("level", 1), default=1, lo=1, hi=6)
+    settings = load_settings()
+    nodes = tree_list_themes(settings, level=level)
+    if not nodes:
+        st = tree_status(settings)
+        if not st.exists:
+            return [
+                types.TextContent(
+                    type="text",
+                    text=(
+                        "No summary tree built yet. Run `murano tree rebuild` "
+                        "after indexing your vault."
+                    ),
+                )
+            ]
+        return [
+            types.TextContent(
+                type="text",
+                text=(
+                    f"No nodes at level {level}. Tree has levels: "
+                    f"{', '.join(str(lv) for lv in st.levels)}."
+                ),
+            )
+        ]
+
+    text_lines = [f"Level {level}: {len(nodes)} theme(s)", ""]
+    structured = []
+    for n in nodes:
+        text_lines.append(f"[{n.id}] {n.title}  ({n.member_count} members)")
+        for line in n.summary.splitlines():
+            text_lines.append(f"    {line}")
+        text_lines.append("")
+        structured.append(
+            {
+                "id": n.id,
+                "level": n.level,
+                "title": n.title,
+                "summary": n.summary,
+                "member_count": n.member_count,
+                "parent_id": n.parent_id,
+            }
+        )
+
+    return [
+        types.TextContent(type="text", text="\n".join(text_lines).rstrip() + "\n"),
+        types.TextContent(
+            type="text",
+            text=json.dumps({"level": level, "themes": structured}, ensure_ascii=False, indent=2),
+        ),
+    ]
+
+
+def _tool_get_chunk(arguments: dict[str, Any]) -> list[types.TextContent]:
+    chunk_id = _require_str(arguments, "chunk_id")
+    settings = load_settings()
+    if not settings.chunks_db.exists():
+        raise RuntimeError(
+            f"No index found at {settings.chunks_db}. Run `murano index` first."
+        )
+    rec = tree_get_chunk(settings, chunk_id)
+    if rec is None:
+        raise RuntimeError(f"Chunk not found: {chunk_id!r}")
+    text_payload = (
+        f"chunk_id:    {rec.chunk_id}\n"
+        f"file:        {rec.file_path}\n"
+        f"heading:     {rec.heading_path or '(none)'}\n"
+        f"tokens:      {rec.token_count}\n"
+        f"byte_offset: {rec.byte_offset}\n"
+        f"---\n"
+        f"{rec.content}\n"
+    )
+    structured = json.dumps(
+        {
+            "chunk_id": rec.chunk_id,
+            "file_path": rec.file_path,
+            "ord": rec.ord,
+            "heading_path": rec.heading_path,
+            "token_count": rec.token_count,
+            "byte_offset": rec.byte_offset,
+            "content": rec.content,
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+    return [
+        types.TextContent(type="text", text=text_payload),
         types.TextContent(type="text", text=structured),
     ]
 

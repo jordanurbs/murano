@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 from ..config import Settings
-from .retriever import RetrievalResult, RetrievedChunk, Retriever
+from .retriever import RetrievalResult, RetrievedChunk, RetrievedSummary, Retriever
 
 DEFAULT_K = 6
 DEFAULT_MAX_TOKENS = 1024
@@ -52,21 +52,45 @@ class AnswerEvent:
 
 SYSTEM_PROMPT = """You are Murano, a personal knowledge-base assistant.
 
-Answer the user's question using ONLY the provided context excerpts. If the answer is not present in the context, say so plainly — do not invent facts.
+Answer the user's question using ONLY the provided context. If the answer is not present in the context, say so plainly — do not invent facts.
 
-Cite every factual claim with an Obsidian-style citation immediately after the claim, in the form `[[file#heading]]`, where `file` and `heading` come from the SOURCE and HEADING lines of the excerpt you used. Use the exact citation key shown after each excerpt's `CITE:` marker. Do not invent citation keys. Multiple sources for the same claim should each be cited in their own `[[...]]` pair.
+The context may include a "Themes" section: short LLM-written summaries of clusters of related notes in the vault. Themes give you orientation — use them to choose which excerpts matter and to phrase your answer with the right framing — but DO NOT cite themes. Themes are context, not sources.
+
+The context also includes "Excerpts": numbered passages from the vault. THESE are your sources. Cite every factual claim with an Obsidian-style citation immediately after the claim, in the form `[[file#heading]]`. Use the exact citation key shown after each excerpt's `CITE:` marker. Do not invent citation keys. Multiple sources for the same claim should each be cited in their own `[[...]]` pair.
 
 Be concise and direct. Prefer the user's terminology."""
 
 
-def build_user_prompt(query: str, hits: list[RetrievedChunk]) -> str:
-    """Assemble the user-side prompt: question + numbered context excerpts."""
+def build_user_prompt(
+    query: str,
+    hits: list[RetrievedChunk],
+    summaries: list[RetrievedSummary] | None = None,
+) -> str:
+    """Assemble the user-side prompt: question + optional themes + numbered excerpts."""
+    summaries = summaries or []
+    sections: list[str] = [f"Question: {query}", ""]
+
+    if summaries:
+        sections.append("Themes (background only — do NOT cite):")
+        sections.append("")
+        for i, s in enumerate(summaries, start=1):
+            sections.append(f"({chr(96 + i)}) {s.title} [{s.member_count} notes]")
+            sections.append(_indent(s.summary, prefix="     "))
+            sections.append("")
+        sections.append("---")
+        sections.append("")
+
     if not hits:
-        return (
-            f"Question: {query}\n\n"
-            "Context excerpts: (none — the knowledge base returned no matches)\n\n"
+        sections.append("Excerpts: (none — the knowledge base returned no matches)")
+        sections.append("")
+        sections.append(
             "Answer the question now. If you cannot answer from context, say so."
         )
+        return "\n".join(sections)
+
+    sections.append("Excerpts (ranked by relevance, most relevant first):")
+    sections.append("")
+
     blocks: list[str] = []
     for i, h in enumerate(hits, start=1):
         heading_line = h.heading_path or "(no heading)"
@@ -76,13 +100,10 @@ def build_user_prompt(query: str, hits: list[RetrievedChunk]) -> str:
             f"    CITE: [[{h.citation_key}]]\n"
             f"    EXCERPT:\n{_indent(h.content)}"
         )
-    context = "\n\n---\n\n".join(blocks)
-    return (
-        f"Question: {query}\n\n"
-        f"Context excerpts (ranked by relevance, most relevant first):\n\n"
-        f"{context}\n\n"
-        "Answer the question now, citing each claim with the matching `[[...]]` key."
-    )
+    sections.append("\n\n---\n\n".join(blocks))
+    sections.append("")
+    sections.append("Answer the question now, citing each claim with the matching `[[...]]` key.")
+    return "\n".join(sections)
 
 
 def _indent(text: str, prefix: str = "        ") -> str:
@@ -107,6 +128,9 @@ class StreamConfig:
     k: int = DEFAULT_K
     max_tokens: int = DEFAULT_MAX_TOKENS
     temperature: float = DEFAULT_TEMPERATURE
+    include_summaries: bool = True
+    summary_k: int = 2
+    summary_level: int = 1
     extra: dict = field(default_factory=dict)
 
 
@@ -123,12 +147,21 @@ def stream_answer(
     """
     cfg = config or StreamConfig()
     with Retriever.open(settings) as r:
-        retrieval = r.retrieve(query, k=cfg.k)
+        retrieval = r.retrieve(
+            query,
+            k=cfg.k,
+            include_summaries=cfg.include_summaries,
+            summary_k=cfg.summary_k,
+            summary_level=cfg.summary_level,
+        )
         yield AnswerEvent(kind="retrieval", retrieval=retrieval)
 
         messages = [
             {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": build_user_prompt(query, retrieval.hits)},
+            {
+                "role": "user",
+                "content": build_user_prompt(query, retrieval.hits, retrieval.summaries),
+            },
         ]
 
         accumulated: list[str] = []

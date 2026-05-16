@@ -20,6 +20,7 @@ from murano.chat.answer import (
 from murano.chat.retriever import Retriever, derive_citation_key
 from murano.config import Settings
 from murano.index import db as dbmod
+from murano.tree import db as tree_db
 from murano.venice import ResolvedModel, ResolvedModels
 
 EMBED_DIMS = 8
@@ -252,7 +253,91 @@ def test_collect_answer_returns_text_and_retrieval(settings_with_index: Settings
     assert "cooking/risotto#Ingredients" in cited
 
 
-def test_system_prompt_mentions_citation_format() -> None:
-    """Guardrail: the model instructions must spell out the Obsidian citation format."""
+def test_system_prompt_mentions_citation_format_and_themes() -> None:
+    """Guardrail: the model instructions must spell out the Obsidian citation format AND
+    that themes are context, not sources."""
     assert "[[file#heading]]" in SYSTEM_PROMPT
-    assert "ONLY the provided context excerpts" in SYSTEM_PROMPT
+    assert "ONLY the provided context" in SYSTEM_PROMPT
+    assert "DO NOT cite themes" in SYSTEM_PROMPT
+
+
+def test_hybrid_retrieve_includes_summaries_when_tree_present(settings_with_index: Settings) -> None:
+    """If a summary_tree.db exists, retrieve() pulls top-N summaries alongside chunks."""
+
+    class _FakeClient:
+        pass
+
+    # Seed a tiny tree pointing at the chunks already in settings_with_index.
+    tconn = tree_db.connect(settings_with_index.summary_tree_db)
+    try:
+        tree_db.rebuild(
+            tconn,
+            nodes=[
+                tree_db.TreeNodeRow(
+                    id="L1::method",
+                    level=1,
+                    title="Risotto cooking method",
+                    summary="How to cook risotto: saute, deglaze, ladle.",
+                    member_count=1,
+                    parent_id=None,
+                    embedding=_vec(1, 0, 0, 0, 0, 0, 0, 0),
+                ),
+                tree_db.TreeNodeRow(
+                    id="L1::ingr",
+                    level=1,
+                    title="Risotto ingredients",
+                    summary="What goes into mushroom risotto.",
+                    member_count=1,
+                    parent_id=None,
+                    embedding=_vec(0, 1, 0, 0, 0, 0, 0, 0),
+                ),
+            ],
+            edges=[
+                ("L1::method", "cooking/risotto.md::0", 0),
+                ("L1::ingr", "cooking/risotto.md::1", 0),
+            ],
+            embed_model="fake-embed",
+            embed_dims=EMBED_DIMS,
+            chat_model="qwen-3-6-plus",
+            source_chunk_count=2,
+        )
+    finally:
+        tconn.close()
+
+    def fake_embed_one(_client, _model, text):  # noqa: ARG001
+        return _vec(0.9, 0.1, 0, 0, 0, 0, 0, 0)
+
+    with (
+        patch("murano.chat.retriever.build_client", return_value=_FakeClient()),
+        patch("murano.chat.retriever.resolve_models", return_value=_resolved()),
+        patch("murano.chat.retriever.embed_one", side_effect=fake_embed_one),
+        Retriever.open(settings_with_index) as r,
+    ):
+        result = r.retrieve("how do I cook risotto?", k=2, include_summaries=True, summary_k=2)
+
+    assert result.hits  # chunks still come back
+    assert len(result.summaries) == 2
+    assert {s.node_id for s in result.summaries} == {"L1::method", "L1::ingr"}
+    # The summaries are ordered by distance — nearest first.
+    assert result.summaries[0].distance <= result.summaries[1].distance
+
+
+def test_hybrid_retrieve_is_no_op_when_no_tree(settings_with_index: Settings) -> None:
+    """No tree DB present -> summaries is empty, hits unchanged."""
+
+    class _FakeClient:
+        pass
+
+    def fake_embed_one(_client, _model, text):  # noqa: ARG001
+        return _vec(0.9, 0.1, 0, 0, 0, 0, 0, 0)
+
+    assert not settings_with_index.summary_tree_db.exists()
+    with (
+        patch("murano.chat.retriever.build_client", return_value=_FakeClient()),
+        patch("murano.chat.retriever.resolve_models", return_value=_resolved()),
+        patch("murano.chat.retriever.embed_one", side_effect=fake_embed_one),
+        Retriever.open(settings_with_index) as r,
+    ):
+        result = r.retrieve("how do I cook risotto?", k=2, include_summaries=True, summary_k=2)
+    assert result.summaries == []
+    assert len(result.hits) == 2

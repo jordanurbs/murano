@@ -17,6 +17,7 @@ For example, a chunk at `cooking/risotto.md` under heading path
 
 from __future__ import annotations
 
+import sqlite3
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -25,6 +26,7 @@ from typing import TYPE_CHECKING
 from ..config import Settings
 from ..index import db as dbmod
 from ..index.embed import embed_one
+from ..tree import db as tree_db
 from ..vault.chunker import HEADING_SEPARATOR
 from ..venice import ResolvedModels, build_client, resolve_models
 
@@ -46,6 +48,18 @@ class RetrievedChunk:
 
 
 @dataclass
+class RetrievedSummary:
+    """One summary node surfaced by hybrid retrieval (context, not a citation)."""
+
+    node_id: str
+    level: int
+    title: str
+    summary: str
+    member_count: int
+    distance: float
+
+
+@dataclass
 class RetrievalResult:
     """The output of a single retrieve() call."""
 
@@ -55,6 +69,11 @@ class RetrievalResult:
     chat_model: str
     embed_dims: int | None
     elapsed_ms: float
+    summaries: list[RetrievedSummary] = None  # type: ignore[assignment]
+
+    def __post_init__(self) -> None:
+        if self.summaries is None:
+            self.summaries = []
 
 
 def derive_citation_key(file_path: str, heading_path: str) -> str:
@@ -93,11 +112,13 @@ class Retriever:
         client: OpenAI,
         resolved: ResolvedModels,
         conn,  # sqlite3.Connection
+        tree_conn=None,  # sqlite3.Connection | None
     ) -> None:
         self.settings = settings
         self.client = client
         self.resolved = resolved
         self.conn = conn
+        self.tree_conn = tree_conn
 
     @classmethod
     @contextmanager
@@ -111,17 +132,62 @@ class Retriever:
                 "cannot open the vector index."
             )
         conn = dbmod.connect(settings.chunks_db)
+        tconn: sqlite3.Connection | None = None
+        if settings.summary_tree_db.exists():
+            tconn = tree_db.connect(settings.summary_tree_db)
+            if not tree_db.has_tree(tconn):
+                tconn.close()
+                tconn = None
         try:
             dbmod.init_for_model(conn, resolved.embed.resolved, resolved.embed.embedding_dimensions)
-            yield cls(settings=settings, client=client, resolved=resolved, conn=conn)
+            yield cls(
+                settings=settings,
+                client=client,
+                resolved=resolved,
+                conn=conn,
+                tree_conn=tconn,
+            )
         finally:
             conn.close()
+            if tconn is not None:
+                tconn.close()
 
-    def retrieve(self, query: str, k: int = 6) -> RetrievalResult:
-        """Embed the query and return the top-k chunks ranked by vector distance."""
+    def retrieve(
+        self,
+        query: str,
+        k: int = 6,
+        *,
+        include_summaries: bool = True,
+        summary_k: int = 2,
+        summary_level: int = 1,
+    ) -> RetrievalResult:
+        """Embed the query and return the top-k chunks (and optionally top summaries).
+
+        When `include_summaries=True` AND a summary tree exists in this settings'
+        data dir, also pulls `summary_k` summary nodes at `summary_level`. The
+        same query embedding is reused for both lookups — one network call total.
+        """
         started = time.monotonic()
         query_vec = embed_one(self.client, self.resolved.embed.resolved, query)
         raw_hits = dbmod.search(self.conn, query_vec, k=k)
+
+        summaries: list[RetrievedSummary] = []
+        if include_summaries and self.tree_conn is not None and summary_k > 0:
+            raw_summaries = tree_db.search_summaries(
+                self.tree_conn, query_vec, level=summary_level, k=summary_k
+            )
+            summaries = [
+                RetrievedSummary(
+                    node_id=s.node_id,
+                    level=s.level,
+                    title=s.title,
+                    summary=s.summary,
+                    member_count=s.member_count,
+                    distance=s.distance,
+                )
+                for s in raw_summaries
+            ]
+
         elapsed_ms = (time.monotonic() - started) * 1000.0
 
         hits = [
@@ -144,4 +210,5 @@ class Retriever:
             chat_model=self.resolved.chat.resolved,
             embed_dims=self.resolved.embed.embedding_dimensions,
             elapsed_ms=elapsed_ms,
+            summaries=summaries,
         )

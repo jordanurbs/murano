@@ -19,7 +19,15 @@ import pytest
 
 from murano.config import Settings
 from murano.index import db as dbmod
-from murano.mcp.server import _build_server, _tool_ask, _tool_capture, _tool_search
+from murano.mcp.server import (
+    _build_server,
+    _tool_ask,
+    _tool_capture,
+    _tool_get_chunk,
+    _tool_list_themes,
+    _tool_search,
+)
+from murano.tree import db as tree_db
 from murano.venice import ResolvedModel, ResolvedModels
 
 EMBED_DIMS = 8
@@ -164,12 +172,21 @@ def test_list_tools_returns_all_registered_tools() -> None:
     result = result_root.root
     assert isinstance(result, types.ListToolsResult)
     names = sorted(t.name for t in result.tools)
-    assert names == ["ask_kb", "capture_url", "search_kb"]
+    assert names == [
+        "ask_kb",
+        "capture_url",
+        "get_chunk",
+        "list_themes",
+        "search_kb",
+    ]
 
     by_name = {t.name: t for t in result.tools}
     assert "query" in by_name["search_kb"].inputSchema["required"]
     assert "query" in by_name["ask_kb"].inputSchema["required"]
     assert "url" in by_name["capture_url"].inputSchema["required"]
+    assert "chunk_id" in by_name["get_chunk"].inputSchema["required"]
+    # list_themes has no required args (level defaults to 1)
+    assert by_name["list_themes"].inputSchema.get("required", []) == []
 
 
 def test_search_kb_returns_text_and_structured_json(vault_with_chunks: Settings) -> None:
@@ -314,6 +331,81 @@ def test_capture_url_tool_rejects_blank_url(vault_with_chunks: Settings) -> None
 def test_capture_url_tool_rejects_non_list_tags(vault_with_chunks: Settings) -> None:
     with pytest.raises(ValueError, match="tags"):
         _tool_capture({"url": "https://example.com/x", "tags": "not-a-list"})
+
+
+def _seed_tree(vault_with_chunks: Settings) -> None:
+    """Insert a tiny tree directly into summary_tree.db (no LLM call needed)."""
+    nodes = [
+        tree_db.TreeNodeRow(
+            id="L1::0",
+            level=1,
+            title="Risotto methods",
+            summary="Notes on how to cook risotto well.",
+            member_count=2,
+            parent_id=None,
+            embedding=_vec(1, 0, 0, 0, 0, 0, 0, 0),
+        ),
+        tree_db.TreeNodeRow(
+            id="L1::1",
+            level=1,
+            title="Risotto ingredients",
+            summary="Ingredients commonly used in mushroom risotto.",
+            member_count=1,
+            parent_id=None,
+            embedding=_vec(0, 1, 0, 0, 0, 0, 0, 0),
+        ),
+    ]
+    edges = [
+        ("L1::0", "cooking/risotto.md::0", 0),
+        ("L1::1", "cooking/risotto.md::1", 0),
+    ]
+    tconn = tree_db.connect(vault_with_chunks.summary_tree_db)
+    try:
+        tree_db.rebuild(
+            tconn,
+            nodes=nodes,
+            edges=edges,
+            embed_model="fake-embed",
+            embed_dims=EMBED_DIMS,
+            chat_model="fake-chat",
+            source_chunk_count=2,
+        )
+    finally:
+        tconn.close()
+
+
+def test_list_themes_tool_returns_text_and_json(vault_with_chunks: Settings) -> None:
+    _seed_tree(vault_with_chunks)
+    out = _tool_list_themes({"level": 1})
+    assert len(out) == 2
+    text, structured_json = out[0].text, out[1].text
+    assert "Risotto methods" in text
+    assert "Risotto ingredients" in text
+    payload = json.loads(structured_json)
+    assert payload["level"] == 1
+    assert {t["id"] for t in payload["themes"]} == {"L1::0", "L1::1"}
+
+
+def test_list_themes_tool_helpful_when_tree_missing(vault_with_chunks: Settings) -> None:
+    out = _tool_list_themes({"level": 1})
+    assert len(out) == 1
+    assert "No summary tree built yet" in out[0].text
+
+
+def test_get_chunk_tool_returns_payload(vault_with_chunks: Settings) -> None:
+    out = _tool_get_chunk({"chunk_id": "cooking/risotto.md::0"})
+    assert len(out) == 2
+    text, structured_json = out[0].text, out[1].text
+    assert "cooking/risotto.md" in text
+    assert "Saute the mushrooms" in text
+    payload = json.loads(structured_json)
+    assert payload["chunk_id"] == "cooking/risotto.md::0"
+    assert payload["heading_path"] == "Mushroom Risotto \u203a Method"
+
+
+def test_get_chunk_tool_missing_raises(vault_with_chunks: Settings) -> None:
+    with pytest.raises(RuntimeError, match="not found"):
+        _tool_get_chunk({"chunk_id": "ghost.md::99"})
 
 
 def test_call_tool_search_kb_via_dispatcher(vault_with_chunks: Settings) -> None:
