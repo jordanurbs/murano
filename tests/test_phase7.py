@@ -333,3 +333,105 @@ def test_capture_feed_ignores_entries_without_link(settings: Settings) -> None:
     )
     assert len(report.errors) == 1
     assert "No link" in (report.errors[0].error or "")
+
+
+def test_capture_feed_seen_ids_trim_is_deterministic_fifo(
+    settings: Settings, tmp_path: Path
+) -> None:
+    """Regression for the audit-found set-ordering bug.
+
+    Previously `seen_ids` was a set and persisted via `list(set)[-N:]`;
+    set iteration order is non-deterministic in Python, so once the set
+    grew beyond the trim window, *which* IDs survived was arbitrary —
+    causing duplicate captures on subsequent runs.
+
+    The fix uses an ordered list backed by a set for lookups; the FIFO
+    trim must keep the newest N entries.
+    """
+    feed_url = "https://example.com/feed.xml"
+
+    # Pre-seed the state with 200 sequential IDs from a prior run, so a
+    # subsequent capture run with limit=50 (trim window = 100) will be
+    # forced to trim 150 of them deterministically.
+    state_path = settings.logs_dir / feed_mod.STATE_FILENAME
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    import json
+    pre_seeded = [f"id-{i:04d}" for i in range(200)]
+    state_path.write_text(
+        json.dumps({feed_url: {"seen_ids": pre_seeded, "feed_title": "Big feed"}}),
+        encoding="utf-8",
+    )
+
+    def fake_capture(_s, url, *, extra_tags=None):  # noqa: ARG001
+        return CapturedPage(
+            url=url, title="T",
+            relpath=f"web-captures/{url.rsplit('/', 1)[-1]}.md",
+            absolute_path=tmp_path / "x.md",
+            word_count=1, byte_count=1,
+            site_name=None, published_date=None,
+        )
+
+    # New entries id-1000..id-1049 (none seen before). limit=50, window=100.
+    parsed = _FakeParsed(
+        entries=[
+            _FakeEntry(f"https://example.com/{i}", f"T{i}", f"id-{i:04d}")
+            for i in range(1000, 1050)
+        ],
+        feed_title="Big feed",
+    )
+    report = feed_mod.capture_feed(
+        settings, feed_url, limit=50,
+        parser=lambda _url: parsed, capture_fn=fake_capture,
+    )
+    assert len(report.captured) == 50
+
+    state = feed_mod._load_state(settings)
+    seen = state[feed_url]["seen_ids"]
+    # Total before trim: 200 (pre-seeded) + 50 (new) = 250.
+    # Trim window: max(50 * 2, 100) = 100. So keep the newest 100.
+    # That means id-0150..id-0199 (last 50 of pre-seed) + id-1000..id-1049.
+    assert isinstance(seen, list)
+    assert len(seen) == 100, f"expected window=100, got {len(seen)}"
+    assert seen[0] == "id-0150", f"oldest survivor wrong; got {seen[0]}"
+    assert seen[-1] == "id-1049", f"newest survivor wrong; got {seen[-1]}"
+
+    # And critically: running this test multiple times must produce the
+    # *same* survivors. Re-run with no new entries; trim is a no-op.
+    parsed_empty = _FakeParsed(entries=[], feed_title="Big feed")
+    feed_mod.capture_feed(
+        settings, feed_url, limit=50,
+        parser=lambda _url: parsed_empty, capture_fn=fake_capture,
+    )
+    state2 = feed_mod._load_state(settings)
+    assert state2[feed_url]["seen_ids"] == seen, "trim must be deterministic"
+
+
+def test_capture_feed_legacy_set_state_is_coerced_to_list(
+    settings: Settings, tmp_path: Path
+) -> None:
+    """Defensive: pre-fix state files stored seen_ids as a list-derived-from-set.
+    A future run must still treat it as ordered without crashing."""
+    # Pre-seed state file with a list-typed (post-fix) shape.
+    state_path = settings.logs_dir / feed_mod.STATE_FILENAME
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(
+        '{"https://x/feed": {"seen_ids": ["a", "b"], "feed_title": "X"}}',
+        encoding="utf-8",
+    )
+    parsed = _FakeParsed(
+        entries=[_FakeEntry("https://example.com/c", "C", "c")], feed_title="X"
+    )
+    report = feed_mod.capture_feed(
+        settings,
+        "https://x/feed",
+        parser=lambda _url: parsed,
+        capture_fn=lambda *a, **k: CapturedPage(
+            url="x", title="x", relpath="r.md",
+            absolute_path=tmp_path / "x.md", word_count=1, byte_count=1,
+            site_name=None, published_date=None,
+        ),
+    )
+    assert len(report.captured) == 1
+    state = feed_mod._load_state(settings)
+    assert "c" in state["https://x/feed"]["seen_ids"]
+    assert state["https://x/feed"]["seen_ids"][-1] == "c"

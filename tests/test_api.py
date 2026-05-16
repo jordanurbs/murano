@@ -111,6 +111,33 @@ def test_health_returns_paths_and_counts(client: TestClient, vault_env: Settings
     assert body["file_count"] == 1
     assert body["summary_tree_exists"] is False
     assert body["chat_model"] == "qwen-3-6-plus"
+    assert "venice_base_url" in body
+    # api_key_source must reflect actual key availability for the active base URL.
+    assert body["api_key_source"] in ("keychain", "env", "none")
+
+
+def test_health_api_key_source_env_for_custom_base(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """Audit fix: api_key_present alone was misleading when the user is on a
+    custom base URL with MURANO_API_KEY. Now we report the effective source."""
+    monkeypatch.setenv("MURANO_VENICE_BASE_URL", "http://localhost:11434/v1")
+    monkeypatch.setenv("MURANO_API_KEY", "local-token")
+    r = client.get("/api/v1/health")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["api_key_source"] == "env"
+    assert body["venice_base_url"] == "http://localhost:11434/v1"
+
+
+def test_health_api_key_source_none_for_custom_base_without_env(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    monkeypatch.setenv("MURANO_VENICE_BASE_URL", "http://localhost:11434/v1")
+    monkeypatch.delenv("MURANO_API_KEY", raising=False)
+    r = client.get("/api/v1/health")
+    assert r.status_code == 200
+    assert r.json()["api_key_source"] == "none"
 
 
 # --------- search (no LLM call) ---------
@@ -306,34 +333,22 @@ def test_themes_returns_nodes_when_tree_present(client: TestClient, vault_env: S
 
 
 def test_capture_endpoint_writes_and_indexes(client: TestClient, vault_env: Settings) -> None:
-    sample_html = """
-    <html><head><title>Demo Article</title></head><body><article>
-    <h1>Demo Article</h1>
-    <p>A page with substantive text so trafilatura extracts it. Risotto is creamy.
-    The Po Valley grows rice. Italians invented this dish.</p>
-    <p>More text to convince trafilatura we have real content.</p>
-    </article></body></html>
-    """
-    with (
-        patch("murano.api.routes.capture_url") as cap_mock,
-        patch("murano.api.routes.index_vault") as idx_mock,
+    from murano.capture.web import CaptureAndIndexResult, CapturedPage
+
+    page = CapturedPage(
+        url="https://example.com/demo",
+        title="Demo Article",
+        relpath="web-captures/2026-05-16-demo-article.md",
+        absolute_path=vault_env.vault_root / "web-captures/2026-05-16-demo-article.md",
+        word_count=42,
+        byte_count=512,
+        site_name=None,
+        published_date=None,
+    )
+    with patch(
+        "murano.api.routes.capture_and_index",
+        return_value=CaptureAndIndexResult(page=page, chunks_indexed=3),
     ):
-        from murano.capture.web import CapturedPage
-
-        cap_mock.return_value = CapturedPage(
-            url="https://example.com/demo",
-            title="Demo Article",
-            relpath="web-captures/2026-05-16-demo-article.md",
-            absolute_path=vault_env.vault_root / "web-captures/2026-05-16-demo-article.md",
-            word_count=42,
-            byte_count=512,
-            site_name=None,
-            published_date=None,
-        )
-        idx_mock.return_value = type("R", (), {"chunks_inserted": 3})()
-        # The sample_html is unused since capture_url is mocked, but documents intent.
-        _ = sample_html
-
         r = client.post(
             "/api/v1/capture",
             json={"url": "https://example.com/demo", "tags": ["demo"]},
@@ -343,6 +358,26 @@ def test_capture_endpoint_writes_and_indexes(client: TestClient, vault_env: Sett
     assert body["url"] == "https://example.com/demo"
     assert body["chunks_indexed"] == 3
     assert body["relpath"].startswith("web-captures/")
+
+
+def test_capture_endpoint_rejects_bad_url(client: TestClient) -> None:
+    """Audit-noted gap: /capture had no bad-URL tests beyond the happy path."""
+    for bad_url in (
+        "file:///etc/passwd",
+        "ftp://example.com/x",
+        "javascript:alert(1)",
+        "not-a-url",
+        "",
+    ):
+        if bad_url == "":
+            # Empty URL fails pydantic validation -> 422.
+            r = client.post("/api/v1/capture", json={"url": bad_url})
+            assert r.status_code == 422
+        else:
+            r = client.post("/api/v1/capture", json={"url": bad_url})
+            # Bad URLs raise CaptureError -> 400.
+            assert r.status_code == 400, f"bad_url={bad_url!r}"
+            assert "Invalid URL" in r.json().get("detail", "")
 
 
 # --------- open (security) ---------

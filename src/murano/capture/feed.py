@@ -122,7 +122,15 @@ def capture_feed(
 
     state = _load_state(settings)
     feed_state = state.get(feed_url, {})
-    seen_ids: set[str] = set(feed_state.get("seen_ids", []))
+    # `seen_ids` is persisted as an *ordered* list (oldest -> newest). We keep
+    # an in-memory parallel set for O(1) membership lookup. Don't switch to a
+    # bare set: set iteration order is non-deterministic and the eventual
+    # FIFO trim below would silently drop arbitrary IDs, causing duplicate
+    # captures on subsequent runs. (Caught by the second-round audit.)
+    raw_seen = feed_state.get("seen_ids", [])
+    # Defensive: if a legacy state file persisted a non-list, coerce to list.
+    seen_list: list[str] = list(raw_seen) if isinstance(raw_seen, list) else list(raw_seen)
+    seen_set: set[str] = set(seen_list)
 
     tags = list(extra_tags or [])
     if "rss" not in tags:
@@ -138,7 +146,7 @@ def capture_feed(
                 FeedEntryResult(url="", title=title, status="error", error="No link in entry")
             )
             continue
-        if eid in seen_ids:
+        if eid in seen_set:
             report.seen.append(FeedEntryResult(url=link, title=title, status="seen"))
             continue
         try:
@@ -156,10 +164,17 @@ def capture_feed(
                 relpath=page.relpath,
             )
         )
-        if eid:
-            seen_ids.add(eid)
+        if eid and eid not in seen_set:
+            seen_list.append(eid)
+            seen_set.add(eid)
 
-    # Persist trimmed state (keep at most 2× limit so the file doesn't grow forever).
-    state[feed_url] = {"seen_ids": list(seen_ids)[-max(limit * 2, 100):], "feed_title": feed_title}
+    # Persist trimmed state (keep at most 2× limit so the file doesn't grow
+    # forever). FIFO: drop the oldest, keep the newest. Deterministic across
+    # runs and Python builds because `seen_list` preserves insertion order.
+    trim_window = max(limit * 2, 100)
+    state[feed_url] = {
+        "seen_ids": seen_list[-trim_window:],
+        "feed_title": feed_title,
+    }
     _save_state(settings, state)
     return report

@@ -63,6 +63,15 @@ class CapturedPage:
     published_date: str | None
 
 
+@dataclass
+class CaptureAndIndexResult:
+    """Result of `capture_and_index`: capture metadata + index outcome."""
+
+    page: CapturedPage
+    chunks_indexed: int  # -1 sentinel = capture succeeded, indexing failed/skipped
+    index_skipped_reason: str | None = None
+
+
 def slugify(text: str, *, max_len: int = MAX_SLUG_LEN) -> str:
     """Filesystem-safe, ASCII-only slug.
 
@@ -248,3 +257,45 @@ def capture_url(
         site_name=meta["site_name"],
         published_date=meta["published_date"],
     )
+
+
+def capture_and_index(
+    settings: Settings,
+    url: str,
+    *,
+    extra_tags: list[str] | None = None,
+    out_subdir: str = WEB_CAPTURE_SUBDIR,
+    fetcher=None,
+) -> CaptureAndIndexResult:
+    """Capture a URL into the vault and immediately index the new file.
+
+    Single source of truth for the "capture then index, tolerate Venice
+    errors gracefully" policy used by the CLI, the HTTP API, and the MCP
+    tool. Previously each transport reimplemented this with slightly
+    different error handling — drift risk the audit flagged.
+
+    Returns a CaptureAndIndexResult. On a Venice-side failure during
+    indexing, the capture is still persisted (file is on disk) but
+    `chunks_indexed == -1` and `index_skipped_reason` is set.
+    """
+    # Lazy imports to avoid a circular dep with the indexer (which
+    # itself transitively imports capture is not the case here, but
+    # this also keeps `murano capture` cheap when Venice is unreachable).
+    from ..index.indexer import index_vault
+    from ..venice import VeniceAuthError, VeniceConnectionError
+
+    page = capture_url(
+        settings,
+        url,
+        extra_tags=extra_tags,
+        out_subdir=out_subdir,
+        fetcher=fetcher,
+    )
+
+    try:
+        report = index_vault(settings, subpath=Path(page.relpath))
+    except VeniceAuthError as e:
+        return CaptureAndIndexResult(page=page, chunks_indexed=-1, index_skipped_reason=str(e))
+    except VeniceConnectionError as e:
+        return CaptureAndIndexResult(page=page, chunks_indexed=-1, index_skipped_reason=str(e))
+    return CaptureAndIndexResult(page=page, chunks_indexed=report.chunks_inserted)

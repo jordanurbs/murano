@@ -23,7 +23,6 @@ from __future__ import annotations
 
 import json
 import sys
-from pathlib import Path
 from typing import Any
 
 import mcp.types as types
@@ -31,11 +30,10 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 
 from .. import __version__
-from ..capture.web import CaptureError, capture_url
+from ..capture.web import CaptureError, capture_and_index
 from ..chat.answer import StreamConfig, collect_answer, extract_citation_keys
 from ..chat.retriever import Retriever
 from ..config import load_settings
-from ..index.indexer import index_vault
 from ..tree.retrieve import get_chunk as tree_get_chunk
 from ..tree.retrieve import list_themes as tree_list_themes
 from ..tree.retrieve import status as tree_status
@@ -344,7 +342,10 @@ def _tool_capture(arguments: dict[str, Any]) -> list[types.TextContent]:
             f"Vault does not exist at {settings.vault_root}. Run `murano init` first."
         )
 
-    page = capture_url(settings, url, extra_tags=extra_tags or None)
+    # Single source of truth for "capture then index, tolerate Venice errors"
+    # — shared with the CLI and the HTTP /api/v1/capture endpoint.
+    result = capture_and_index(settings, url, extra_tags=extra_tags or None)
+    page = result.page
 
     text_lines = [
         "Captured into the vault:",
@@ -357,19 +358,10 @@ def _tool_capture(arguments: dict[str, Any]) -> list[types.TextContent]:
         text_lines.append(f"  site:     {page.site_name}")
     if page.published_date:
         text_lines.append(f"  published: {page.published_date}")
-
-    # Auto-index so the page is immediately queryable. Index failures fall
-    # back to a warning — the file itself is already on disk.
-    try:
-        report = index_vault(settings, subpath=Path(page.relpath))
-        text_lines.append(
-            f"  indexed:  {report.chunks_inserted} chunks "
-            f"({report.elapsed_seconds:.2f}s)"
-        )
-    except VeniceAuthError as e:
-        text_lines.append(f"  index:    NOT indexed ({e})")
-    except VeniceConnectionError as e:
-        text_lines.append(f"  index:    NOT indexed ({e})")
+    if result.chunks_indexed >= 0:
+        text_lines.append(f"  indexed:  {result.chunks_indexed} chunks")
+    else:
+        text_lines.append(f"  index:    NOT indexed ({result.index_skipped_reason})")
 
     structured = json.dumps(
         {
@@ -381,6 +373,8 @@ def _tool_capture(arguments: dict[str, Any]) -> list[types.TextContent]:
             "byte_count": page.byte_count,
             "site_name": page.site_name,
             "published_date": page.published_date,
+            "chunks_indexed": result.chunks_indexed,
+            "index_skipped_reason": result.index_skipped_reason,
         },
         ensure_ascii=False,
         indent=2,
@@ -490,18 +484,36 @@ def _require_str(arguments: dict[str, Any], key: str) -> str:
 
 
 def _coerce_int(val: Any, *, default: int, lo: int, hi: int) -> int:
+    """Coerce an MCP argument to int, clamped to [lo, hi].
+
+    - If the caller omitted the argument (val is None), return `default`.
+    - If the value is non-numeric, RAISE ValueError so the MCP framework
+      returns CallToolResult(isError=True) instead of silently clamping
+      garbage to a default. (Audit caught the silent-fallback footgun.)
+    - If the value is numeric but out of range, clamp without raising —
+      that's a legitimate "please don't ask Venice for 100k tokens" guard.
+    """
+    if val is None:
+        return default
     try:
         n = int(val)
-    except (TypeError, ValueError):
-        n = default
+    except (TypeError, ValueError) as e:
+        raise ValueError(
+            f"expected an integer; got {type(val).__name__}={val!r}"
+        ) from e
     return max(lo, min(hi, n))
 
 
 def _coerce_float(val: Any, *, default: float, lo: float, hi: float) -> float:
+    """Coerce an MCP argument to float, clamped to [lo, hi]. See `_coerce_int`."""
+    if val is None:
+        return default
     try:
         f = float(val)
-    except (TypeError, ValueError):
-        f = default
+    except (TypeError, ValueError) as e:
+        raise ValueError(
+            f"expected a number; got {type(val).__name__}={val!r}"
+        ) from e
     return max(lo, min(hi, f))
 
 

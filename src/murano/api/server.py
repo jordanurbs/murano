@@ -60,8 +60,13 @@ def create_app(
         title="Murano",
         version=__version__,
         description=(
-            "Private, local-first personal knowledge base. The only outbound "
-            "network call this server makes is to api.venice.ai."
+            "Private, local-first personal knowledge base. By default, the "
+            "only outbound network call this server makes is to api.venice.ai. "
+            "Two narrowly-scoped exceptions exist by design: (1) `/api/v1/capture` "
+            "and the RSS feed walker fetch user-supplied URLs; (2) the env var "
+            "`MURANO_VENICE_BASE_URL` lets advanced users point at any "
+            "OpenAI-compatible endpoint. The keychain Venice API key is only "
+            "ever sent to api.venice.ai; custom endpoints use `MURANO_API_KEY`."
         ),
         lifespan=lifespan,
     )

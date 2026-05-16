@@ -13,7 +13,6 @@ serving.
 
 from __future__ import annotations
 
-import contextlib
 import logging
 import threading
 from dataclasses import dataclass
@@ -211,12 +210,11 @@ def kill_port(port: int) -> int:
         except FileNotFoundError:
             pass
 
-    # Also reach any prior `murano serve` process the OS sees.
-    if system in {"Darwin", "Linux"}:
-        with contextlib.suppress(FileNotFoundError):
-            subprocess.run(
-                ["pkill", "-f", "murano serve"], check=False, capture_output=True
-            )
+    # We deliberately do NOT run `pkill -f 'murano serve'` as a fallback,
+    # even though earlier versions did. The substring match was too broad:
+    # an editor with a file open, a `grep`, or another shell containing the
+    # string "murano serve" would all be killed. lsof-on-port above is
+    # sufficient for the port-conflict case the user actually cares about.
     return killed
 
 

@@ -5,7 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}Murano{% endblock %}</title>
   <link rel="stylesheet" href="/static/style.css">
-  <script src="https://unpkg.com/htmx.org@2.0.4" defer></script>
+  <!-- htmx is vendored under /static/htmx.min.js so the local UI never
+       fetches third-party scripts. Original: htmx.org @ 2.0.4 (BSD-2). -->
+  <script src="/static/htmx.min.js" defer></script>
   {% block head_extra %}{% endblock %}
 </head>
 <body>

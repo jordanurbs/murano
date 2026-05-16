@@ -40,7 +40,7 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) o
 }
 ```
 
-Restart Claude Desktop. In a new chat you should see `search_kb` and `ask_kb` listed under the tools picker. Ask something only your vault knows.
+Restart Claude Desktop. In a new chat you should see all five tools — `search_kb`, `ask_kb`, `capture_url`, `list_themes`, `get_chunk` — listed under the tools picker. Ask something only your vault knows.
 
 The `env` block is optional — Murano falls back to `~/murano/vault/` and `~/.murano/` by default. Override only if you keep your vault elsewhere.
 

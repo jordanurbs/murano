@@ -4,8 +4,11 @@ title: Murano knowledge base
 version: 0.1.0
 description: |
   Query the user's private Markdown vault via Murano (a local-first knowledge
-  base backed by Venice). Murano runs entirely on the user's machine; the only
-  outbound network call it makes is to api.venice.ai.
+  base backed by Venice). Murano runs entirely on the user's machine. By
+  default the only outbound network call is to api.venice.ai. Two designed
+  exceptions: `capture_url` fetches the user-supplied URL, and an operator
+  can point Murano at any OpenAI-compatible endpoint via
+  MURANO_VENICE_BASE_URL (the keychain key is *not* sent to non-Venice hosts).
 author: Murano contributors
 license: MIT
 transports:

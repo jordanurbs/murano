@@ -10,8 +10,11 @@ name: murano
 version: 0.1.0
 description: >
   Query the user's private Markdown vault via Murano (local-first knowledge
-  base backed by Venice). The only outbound network call Murano makes is to
-  api.venice.ai.
+  base backed by Venice). By default the only outbound call is to
+  api.venice.ai. Two designed exceptions: `capture_url` fetches the
+  user-supplied URL, and operators can point Murano at any OpenAI-compatible
+  endpoint via MURANO_VENICE_BASE_URL (the keychain key is *not* sent to
+  non-Venice hosts).
 author: Murano contributors
 license: MIT
 tags: [memory, rag, knowledge-base, local-first]

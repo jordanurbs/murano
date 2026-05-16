@@ -256,6 +256,32 @@ def test_ask_kb_clamps_max_tokens_and_temperature(vault_with_chunks: Settings) -
     assert "[cited]" in out[0].text
 
 
+def test_coerce_int_raises_on_non_numeric(vault_with_chunks: Settings) -> None:  # noqa: ARG001
+    """Audit fix: bad types must surface as protocol errors, not silently clamp."""
+    from murano.mcp.server import _coerce_int
+
+    assert _coerce_int(None, default=10, lo=1, hi=50) == 10
+    assert _coerce_int(5, default=10, lo=1, hi=50) == 5
+    assert _coerce_int(999, default=10, lo=1, hi=50) == 50  # clamp ok
+    assert _coerce_int(-1, default=10, lo=1, hi=50) == 1   # clamp ok
+    with pytest.raises(ValueError, match="integer"):
+        _coerce_int("not a number", default=10, lo=1, hi=50)
+    with pytest.raises(ValueError, match="integer"):
+        _coerce_int([1, 2, 3], default=10, lo=1, hi=50)
+
+
+def test_coerce_float_raises_on_non_numeric() -> None:
+    from murano.mcp.server import _coerce_float
+
+    assert _coerce_float(None, default=0.5, lo=0.0, hi=2.0) == 0.5
+    assert _coerce_float(1.5, default=0.5, lo=0.0, hi=2.0) == 1.5
+    assert _coerce_float(99.0, default=0.5, lo=0.0, hi=2.0) == 2.0  # clamp
+    with pytest.raises(ValueError, match="number"):
+        _coerce_float("hot", default=0.5, lo=0.0, hi=2.0)
+    with pytest.raises(ValueError, match="number"):
+        _coerce_float({"x": 1}, default=0.5, lo=0.0, hi=2.0)
+
+
 def test_call_tool_unknown_tool_is_protocol_error(vault_with_chunks: Settings) -> None:
     """Unknown tool name must yield CallToolResult(isError=True) per MCP protocol."""
     import mcp.types as types

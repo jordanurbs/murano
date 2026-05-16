@@ -99,6 +99,8 @@ class HealthResponse(BaseModel):
     tree_node_count: int
     tree_stale: bool
     tree_stale_reason: str | None
-    api_key_present: bool
+    api_key_present: bool  # legacy: True iff keychain has a Venice key
+    api_key_source: str  # "keychain" | "env" | "none" — the effective key source
     chat_model: str
     embed_model: str
+    venice_base_url: str

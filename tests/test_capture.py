@@ -229,3 +229,33 @@ def test_capture_url_raises_when_extraction_empty(vault: Settings) -> None:
 
     with pytest.raises(CaptureError, match="extracted no content"):
         capture_url(vault, "https://example.com/empty", fetcher=fake_fetch)
+
+
+def test_capture_and_index_returns_index_skip_reason_on_venice_failure(
+    vault: Settings,
+) -> None:
+    """Audit fix: the "capture then index, tolerate Venice errors" policy
+    was duplicated across CLI / HTTP / MCP. The shared helper must return
+    a sentinel + reason instead of leaking exceptions."""
+    from unittest.mock import patch
+
+    from murano.capture.web import capture_and_index
+    from murano.venice import VeniceAuthError
+
+    def fake_fetch(url: str) -> str:  # noqa: ARG001
+        return _SAMPLE_HTML
+
+    with patch(
+        "murano.index.indexer.build_client",
+        side_effect=VeniceAuthError("no key in keychain"),
+    ):
+        result = capture_and_index(
+            vault,
+            "https://example.com/risotto",
+            fetcher=fake_fetch,
+        )
+
+    assert result.page.absolute_path.exists()
+    assert result.chunks_indexed == -1
+    assert result.index_skipped_reason is not None
+    assert "no key" in result.index_skipped_reason.lower()

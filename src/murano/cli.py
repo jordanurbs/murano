@@ -529,7 +529,7 @@ def capture(
     ),
 ) -> None:
     """Capture a web page into the vault as a Markdown file with YAML frontmatter."""
-    from .capture.web import CaptureError, capture_url
+    from .capture.web import CaptureError, capture_and_index, capture_url
 
     settings = load_settings()
     if not settings.vault_root.exists():
@@ -540,12 +540,39 @@ def capture(
         raise typer.Exit(code=1)
 
     console.print(f"[dim]Fetching {url} ...[/]")
+
+    if no_index:
+        try:
+            page = capture_url(settings, url, extra_tags=tags or None)
+        except CaptureError as e:
+            err_console.print(str(e))
+            raise typer.Exit(code=4) from e
+        _print_capture_table(page)
+        console.print(
+            "[dim]Skipped auto-indexing. Run [bold]murano index[/] or "
+            "[bold]murano watch[/] to embed it.[/]"
+        )
+        return
+
     try:
-        page = capture_url(settings, url, extra_tags=tags or None)
+        result = capture_and_index(settings, url, extra_tags=tags or None)
     except CaptureError as e:
         err_console.print(str(e))
         raise typer.Exit(code=4) from e
 
+    _print_capture_table(result.page)
+    if result.chunks_indexed < 0:
+        err_console.print(
+            f"[yellow]Captured but not indexed:[/] {result.index_skipped_reason}"
+        )
+        raise typer.Exit(code=3)
+    console.print(
+        f"[green]Indexed[/] {result.page.relpath} \u2014 "
+        f"{result.chunks_indexed} chunks."
+    )
+
+
+def _print_capture_table(page) -> None:  # noqa: ANN001
     table = Table(title="Captured", show_header=False, header_style="bold cyan")
     table.add_column("field", style="dim")
     table.add_column("value")
@@ -558,29 +585,6 @@ def capture(
     if page.published_date:
         table.add_row("published", page.published_date)
     console.print(table)
-
-    if no_index:
-        console.print(
-            "[dim]Skipped auto-indexing. Run [bold]murano index[/] or [bold]murano watch[/] "
-            "to embed it.[/]"
-        )
-        return
-
-    from .index.indexer import index_vault
-
-    console.print("[dim]Indexing the new file ...[/]")
-    try:
-        report = index_vault(settings, subpath=Path(page.relpath))
-    except VeniceAuthError as e:
-        err_console.print(str(e))
-        raise typer.Exit(code=2) from e
-    except VeniceConnectionError as e:
-        err_console.print(str(e))
-        raise typer.Exit(code=3) from e
-    console.print(
-        f"[green]Indexed[/] {page.relpath} \u2014 "
-        f"{report.chunks_inserted} chunks ({report.elapsed_seconds:.2f}s)."
-    )
 
 
 @app.command("capture-feed")
@@ -683,6 +687,22 @@ def serve(
         f"watch={'on' if watch else 'off'}  "
         f"reload={'on' if reload else 'off'}"
     )
+
+    # Loud warning when the operator binds to anything other than localhost.
+    # All Murano endpoints are unauthenticated by design (single-user local);
+    # exposing them to the LAN makes /open, /capture, /vault/file, /ask
+    # reachable to anyone on the network. This is dangerous and easy to do
+    # by accident (e.g. copy-pasting `--host 0.0.0.0` from a Docker example).
+    _loopback_hosts = {"127.0.0.1", "::1", "localhost"}
+    if host not in _loopback_hosts:
+        err_console.print(
+            "[bold red]WARNING:[/] Murano is binding to a non-loopback address "
+            f"([bold]{host}[/]). All endpoints are unauthenticated. Anyone "
+            "able to reach this address can read your vault, capture URLs "
+            "from your network, open files in your editor, and run LLM calls "
+            "on your Venice key. If this is not what you intend, stop the "
+            "server and re-run without [bold]--host[/]."
+        )
 
     if reload:
         # Reload needs the import-string form; background workers off so the
@@ -1044,8 +1064,10 @@ def tree_show(
 def mcp() -> None:
     """Run the MCP server over stdio for agent frameworks.
 
-    Exposes `search_kb` and `ask_kb` as MCP tools. Wire into Claude Desktop,
-    Cursor, Hermes, OpenClaw, etc. via the configs in `integrations/`.
+    Exposes five MCP tools — `search_kb`, `ask_kb`, `capture_url`,
+    `list_themes`, `get_chunk` — backed by the same retrieval/answer core
+    the CLI and HTTP API use. Wire into Claude Desktop, Cursor, Hermes,
+    OpenClaw, Codex CLI, etc. via the configs in `integrations/`.
 
     Logs go to stderr; stdout is reserved for the MCP protocol.
     """

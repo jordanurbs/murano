@@ -31,7 +31,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from .. import __version__
-from ..capture.web import CaptureError, capture_url
+from ..capture.web import CaptureError, capture_and_index
 from ..chat.answer import StreamConfig, extract_citation_keys, stream_answer
 from ..chat.retriever import Retriever
 from ..config import Settings, get_api_key, load_settings
@@ -39,7 +39,13 @@ from ..index import db as chunks_db
 from ..index.indexer import index_vault
 from ..security import VaultPathError, safe_vault_path
 from ..tree import retrieve as tree_retrieve
-from ..venice import VeniceAuthError, VeniceConnectionError, resolve_models
+from ..venice import (
+    LOCAL_API_KEY_ENV,
+    VeniceAuthError,
+    VeniceConnectionError,
+    _is_canonical_venice,
+    resolve_models,
+)
 from . import schemas
 
 router = APIRouter(prefix="/api/v1")
@@ -48,6 +54,21 @@ router = APIRouter(prefix="/api/v1")
 def get_settings() -> Settings:
     """FastAPI dependency: load settings on each request (cheap, no I/O cost)."""
     return load_settings()
+
+
+def _effective_api_key_source(settings: Settings) -> str:
+    """Report which key the next Venice call would actually use.
+
+    - "keychain": canonical Venice base URL + a keychain key is present.
+    - "env":      custom base URL + MURANO_API_KEY is set.
+    - "none":     no usable key (canonical Venice with empty keychain, or
+                  custom base URL with no MURANO_API_KEY).
+    """
+    import os as _os
+
+    if _is_canonical_venice(settings.venice_base_url):
+        return "keychain" if get_api_key() else "none"
+    return "env" if _os.environ.get(LOCAL_API_KEY_ENV) else "none"
 
 
 @router.get("/health", response_model=schemas.HealthResponse)
@@ -77,8 +98,10 @@ def health(settings: Settings = Depends(get_settings)):
         tree_stale=tree_status.is_stale,
         tree_stale_reason=tree_status.stale_reason,
         api_key_present=bool(get_api_key()),
+        api_key_source=_effective_api_key_source(settings),
         chat_model=settings.chat_model,
         embed_model=settings.embed_model,
+        venice_base_url=settings.venice_base_url,
     )
 
 
@@ -126,19 +149,11 @@ def capture(body: schemas.CaptureRequest, settings: Settings = Depends(get_setti
             detail=f"Vault does not exist at {settings.vault_root}. Run `murano init` first.",
         )
     try:
-        page = capture_url(settings, body.url, extra_tags=body.tags or None)
+        result = capture_and_index(settings, body.url, extra_tags=body.tags or None)
     except CaptureError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
-    chunks_indexed = 0
-    try:
-        report = index_vault(settings, subpath=Path(page.relpath))
-        chunks_indexed = report.chunks_inserted
-    except VeniceAuthError:
-        chunks_indexed = -1  # captured but not indexed; sentinel for clients
-    except VeniceConnectionError:
-        chunks_indexed = -1
-
+    page = result.page
     return schemas.CapturedResponse(
         url=page.url,
         title=page.title,
@@ -148,7 +163,7 @@ def capture(body: schemas.CaptureRequest, settings: Settings = Depends(get_setti
         byte_count=page.byte_count,
         site_name=page.site_name,
         published_date=page.published_date,
-        chunks_indexed=chunks_indexed,
+        chunks_indexed=result.chunks_indexed,
     )
 
 
