@@ -10,10 +10,13 @@ Layout (per MURANO_PLAN.md §6, §7):
     └── logs/
 
 Environment overrides:
-    MURANO_VAULT           override vault root
-    MURANO_DATA            override data root
-    MURANO_CHAT_MODEL      override default chat model
-    MURANO_EMBED_MODEL     override default embedding model
+    MURANO_VAULT             override vault root
+    MURANO_DATA              override data root
+    MURANO_CHAT_MODEL        override default chat model
+    MURANO_EMBED_MODEL       override default embedding model
+    MURANO_VENICE_BASE_URL   point at any OpenAI-compatible endpoint
+                             (Ollama, LM Studio, vLLM, etc.) instead of
+                             api.venice.ai. Leaves keychain handling intact.
 """
 
 from __future__ import annotations
@@ -108,6 +111,10 @@ def load_settings() -> Settings:
         s.vault_root = Path(env).expanduser().resolve()
     if env := os.environ.get("MURANO_DATA"):
         s.data_root = Path(env).expanduser().resolve()
+    if env := os.environ.get("MURANO_VENICE_BASE_URL"):
+        # Lets advanced users point Murano at any OpenAI-compatible endpoint
+        # (Ollama, LM Studio, llama.cpp, vLLM, …) without rebuilding.
+        s.venice_base_url = env
 
     return s
 

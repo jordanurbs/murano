@@ -106,6 +106,7 @@ def _build_one_level(
     embed_model: str,
     seed: int,
     progress: Callable[[str], None] | None,
+    settings: Settings,
 ) -> tuple[list[_Item], list[tree_db.TreeNodeRow], list[tuple[str, str, int]], LevelStats]:
     """Cluster `items` and produce summary nodes at `level`. Returns (new_items, nodes, edges, stats)."""
     started = time.monotonic()
@@ -150,6 +151,7 @@ def _build_one_level(
             client,
             chat_model=chat_model,
             member_texts=[m.text for m in members],
+            usage_log_dir=settings.data_root,
         )
         summary_calls += 1
 
@@ -175,7 +177,14 @@ def _build_one_level(
     if pending_node_ids:
         if progress:
             progress(f"    Embedding {len(summary_texts)} summary nodes...")
-        embeddings = embed_texts(client, embed_model, summary_texts, batch_size=DEFAULT_EMBED_BATCH)
+        embeddings = embed_texts(
+            client,
+            embed_model,
+            summary_texts,
+            batch_size=DEFAULT_EMBED_BATCH,
+            usage_log_dir=settings.data_root,
+            operation="embed-summary",
+        )
         if len(embeddings) != len(pending_node_ids):
             raise RuntimeError(
                 f"Embedding count mismatch: expected {len(pending_node_ids)}, "
@@ -279,6 +288,7 @@ def build_tree(
             embed_model=resolved.embed.resolved,
             seed=seed + level,
             progress=progress,
+            settings=settings,
         )
         if not nodes:
             if progress:

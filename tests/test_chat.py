@@ -149,7 +149,7 @@ def test_retriever_returns_ranked_hits_with_citation_keys(settings_with_index: S
     class _FakeClient:
         pass
 
-    def fake_embed_one(_client, _model, text):  # noqa: ARG001
+    def fake_embed_one(_client, _model, text, **_kw):  # noqa: ARG001
         return _vec(0.9, 0.1, 0, 0, 0, 0, 0, 0)
 
     with (
@@ -304,7 +304,7 @@ def test_hybrid_retrieve_includes_summaries_when_tree_present(settings_with_inde
     finally:
         tconn.close()
 
-    def fake_embed_one(_client, _model, text):  # noqa: ARG001
+    def fake_embed_one(_client, _model, text, **_kw):  # noqa: ARG001
         return _vec(0.9, 0.1, 0, 0, 0, 0, 0, 0)
 
     with (
@@ -328,7 +328,7 @@ def test_hybrid_retrieve_is_no_op_when_no_tree(settings_with_index: Settings) ->
     class _FakeClient:
         pass
 
-    def fake_embed_one(_client, _model, text):  # noqa: ARG001
+    def fake_embed_one(_client, _model, text, **_kw):  # noqa: ARG001
         return _vec(0.9, 0.1, 0, 0, 0, 0, 0, 0)
 
     assert not settings_with_index.summary_tree_db.exists()

@@ -29,7 +29,7 @@ def _resolved(embed_model: str = "fake-embed", dims: int = EMBED_DIMS) -> Resolv
     )
 
 
-def _fake_embed_texts(_client, _model, texts, *, batch_size: int = 32):  # noqa: ARG001
+def _fake_embed_texts(_client, _model, texts, **_kw):  # noqa: ARG001
     out = []
     for t in texts:
         vec = [0.0] * EMBED_DIMS

@@ -158,7 +158,13 @@ def index_vault(
                     progress(fr)
                 continue
 
-            embeddings = embed_texts(client, resolved.embed.resolved, [c.content for c in chunks])
+            embeddings = embed_texts(
+                client,
+                resolved.embed.resolved,
+                [c.content for c in chunks],
+                usage_log_dir=settings.data_root,
+                operation="embed-index",
+            )
             report.embedding_calls += 1
             if len(embeddings) != len(chunks):
                 fr = FileResult(

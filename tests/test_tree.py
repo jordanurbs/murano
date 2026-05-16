@@ -385,7 +385,7 @@ def test_build_tree_produces_two_l1_clusters_on_clean_data(settings_with_chunks:
     expect a sensible cluster count and that each cluster is single-topic."""
     embeddings_returned = []
 
-    def fake_embed_texts(_client, _model, texts, *, batch_size: int = 32):  # noqa: ARG001
+    def fake_embed_texts(_client, _model, texts, **_kw):  # noqa: ARG001
         out = []
         for t in texts:
             if "Theme number" in t:
@@ -429,7 +429,7 @@ def test_build_tree_produces_two_l1_clusters_on_clean_data(settings_with_chunks:
 
 
 def test_tree_status_reports_stale_when_chunks_drift(settings_with_chunks: Settings) -> None:
-    def fake_embed_texts(_client, _model, texts, *, batch_size: int = 32):  # noqa: ARG001
+    def fake_embed_texts(_client, _model, texts, **_kw):  # noqa: ARG001
         return [[1.0 / EMBED_DIMS] * EMBED_DIMS for _ in texts]
 
     with (

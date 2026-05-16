@@ -48,8 +48,10 @@ See [`MURANO_PLAN.md`](./MURANO_PLAN.md) for the full plan and phase breakdown.
 - [x] **Phase 4** — Web capture (`capture <url>` + `capture_url` MCP tool, auto-indexed)
 - [x] **Phase 5** — Hierarchical summary tree (`tree rebuild/show`, hybrid retrieval, `list_themes` + `get_chunk` MCP tools)
 - [x] **Phase 6** — Web UI + REST API (`serve` on port 3000, SSE-streamed chat, vault browser, settings, nightly tree rebuild + background watcher)
-- [ ] **Phase 6.5** — Reference skill files (Hermes, OpenClaw)
-- [ ] **Phase 7** — QoL (token tracker, backup, local-embedding fallback)
+- [x] **Phase 6.5** — Reference skill files (Hermes, OpenClaw, Codex CLI) in [`integrations/`](./integrations/)
+- [x] **Phase 7** — QoL (`usage`, `export`, `backup`, `licenses`, `capture-feed`)
+
+> Local-embedding fallback (`sentence-transformers`) was scoped to Phase 7 but deferred. The embedding call sites would need to be refactored to go through a provider interface, and `sentence-transformers` pulls in PyTorch (~700 MB). Users who really want offline embeddings can swap in any OpenAI-compatible local server (Ollama, LM Studio) and point `MURANO_VENICE_BASE_URL` at it.
 
 ## License
 

@@ -41,6 +41,8 @@ dependencies = [
     "jinja2>=3.1.0",
     "python-multipart>=0.0.9",
     "apscheduler>=3.10.0",
+    # Phase 7: RSS feed capture
+    "feedparser>=6.0.10",
 ]
 
 [project.optional-dependencies]

@@ -1,0 +1,185 @@
+# Murano skill for OpenClaw (and other YAML-skill agent frameworks).
+#
+# Describes Murano's tool surface so an agent can call it via either:
+#   - HTTP   at http://localhost:3000/api/v1/*   (requires `murano serve`)
+#   - MCP    over stdio                          (requires `murano mcp`)
+#
+# Adapt this shape to your framework's actual schema if it differs.
+
+name: murano
+version: 0.1.0
+description: >
+  Query the user's private Markdown vault via Murano (local-first knowledge
+  base backed by Venice). The only outbound network call Murano makes is to
+  api.venice.ai.
+author: Murano contributors
+license: MIT
+tags: [memory, rag, knowledge-base, local-first]
+
+# Either transport works; pick whichever your runtime prefers.
+transports:
+  http:
+    type: openapi
+    base_url: http://localhost:3000/api/v1
+    openapi_url: http://localhost:3000/openapi.json
+  mcp:
+    type: stdio
+    command: murano
+    args: [mcp]
+    env:
+      # Optional: override defaults if the user keeps their vault elsewhere.
+      # MURANO_VAULT: /absolute/path/to/vault
+      # MURANO_DATA:  /absolute/path/to/.murano
+
+tools:
+  - name: search_kb
+    summary: Vector search over the vault. No LLM call.
+    when_to_use: >
+      You want raw passages from the user's notes to reason over yourself,
+      or you want to show the user a ranked list of relevant notes.
+    input_schema:
+      type: object
+      properties:
+        query:
+          type: string
+          description: Natural-language search query.
+        k:
+          type: integer
+          minimum: 1
+          maximum: 50
+          default: 10
+      required: [query]
+    returns:
+      type: object
+      properties:
+        hits:
+          type: array
+          items:
+            type: object
+            properties:
+              rank: { type: integer }
+              chunk_id: { type: string }
+              file_path: { type: string }
+              heading_path: { type: string }
+              citation: { type: string, example: "[[cooking/risotto#Method]]" }
+              distance: { type: number }
+              content: { type: string }
+
+  - name: ask_kb
+    summary: Full RAG. Retrieves chunks + summary themes and asks Venice to answer.
+    when_to_use: >
+      The user asked a natural-language question and wants a cited answer in
+      prose. This is your default for question-answering.
+    input_schema:
+      type: object
+      properties:
+        query:
+          type: string
+        k:
+          type: integer
+          minimum: 1
+          maximum: 20
+          default: 6
+        max_tokens:
+          type: integer
+          minimum: 16
+          maximum: 8192
+          default: 1024
+        temperature:
+          type: number
+          minimum: 0.0
+          maximum: 2.0
+          default: 0.2
+      required: [query]
+    output_format: |
+      Answer text with inline `[[file#heading]]` citations, followed by a
+      Sources footer listing every retrieved chunk and a check mark for the
+      ones the model actually cited.
+
+  - name: capture_url
+    summary: Fetch + extract a web page into the vault as Markdown, then index it.
+    when_to_use: >
+      The user shares a URL and wants it remembered. Captured files live at
+      `<vault>/web-captures/YYYY-MM-DD-<slug>.md` and are immediately
+      searchable.
+    input_schema:
+      type: object
+      properties:
+        url:
+          type: string
+          format: uri
+          description: Absolute http(s) URL to capture.
+        tags:
+          type: array
+          items: { type: string }
+          default: []
+      required: [url]
+    returns:
+      type: object
+      properties:
+        url: { type: string }
+        title: { type: string }
+        relpath: { type: string }
+        word_count: { type: integer }
+        chunks_indexed: { type: integer }
+
+  - name: list_themes
+    summary: Walk Murano's hierarchical summary tree at a given level.
+    when_to_use: >
+      Orient yourself before deciding what to ask. Useful when the user's
+      question is broad ("what are my main interests in X?") or when you want
+      to know what's in the vault before drilling in.
+    input_schema:
+      type: object
+      properties:
+        level:
+          type: integer
+          minimum: 1
+          maximum: 6
+          default: 1
+    returns:
+      type: object
+      properties:
+        level: { type: integer }
+        themes:
+          type: array
+          items:
+            type: object
+            properties:
+              id: { type: string, example: "L1::0" }
+              level: { type: integer }
+              title: { type: string }
+              summary: { type: string }
+              member_count: { type: integer }
+              parent_id: { type: [string, "null"] }
+
+  - name: get_chunk
+    summary: Fetch a single chunk by id from the index.
+    when_to_use: >
+      Follow-up after a citation; the user wants the full passage behind a
+      particular `[[file#heading]]` reference. The chunk_id format is
+      `<file-relpath>::<ord>` as returned by `search_kb` hits.
+    input_schema:
+      type: object
+      properties:
+        chunk_id: { type: string, example: "cooking/risotto.md::2" }
+      required: [chunk_id]
+
+conventions:
+  - Cite every claim with the `[[file#heading]]` keys Murano provides.
+    Never invent or alter citation keys.
+  - Themes are context, not sources. Do not cite a theme node (ids like
+    `L1::0`); only cite chunks (ids like `cooking/risotto.md::2`).
+  - Don't write files outside the vault. The only sanctioned way to add
+    material is `capture_url`.
+
+prerequisites: |
+  The user must have done a one-time setup before this skill works:
+
+    murano init
+    murano config set-key       # paste Venice API key (stored in OS keychain)
+    murano index                # embed the vault
+    murano tree rebuild         # optional but recommended
+    murano serve --restart      # for HTTP transport
+    # OR
+    murano mcp                  # for MCP transport

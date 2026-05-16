@@ -20,11 +20,13 @@ event loop. We can wrap it for FastAPI's streaming response in Phase 6.
 from __future__ import annotations
 
 import re
+import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Literal
 
 from ..config import Settings
+from ..usage import UsageEvent, extract_usage_from_response, log_usage
 from .retriever import RetrievalResult, RetrievedChunk, RetrievedSummary, Retriever
 
 DEFAULT_K = 6
@@ -166,6 +168,8 @@ def stream_answer(
 
         accumulated: list[str] = []
         finish_reason: str | None = None
+        usage_tuple = (0, 0, 0)
+        t0 = time.monotonic()
 
         try:
             stream = r.client.chat.completions.create(
@@ -174,6 +178,7 @@ def stream_answer(
                 temperature=cfg.temperature,
                 max_tokens=cfg.max_tokens,
                 stream=True,
+                stream_options={"include_usage": True},
                 **cfg.extra,
             )
         except Exception as e:
@@ -182,6 +187,11 @@ def stream_answer(
 
         try:
             for chunk in stream:
+                # The final usage chunk has empty `choices` but a populated
+                # `usage` field when stream_options.include_usage=True.
+                chunk_usage = extract_usage_from_response(chunk)
+                if any(chunk_usage):
+                    usage_tuple = chunk_usage
                 if not chunk.choices:
                     continue
                 choice = chunk.choices[0]
@@ -196,6 +206,19 @@ def stream_answer(
         except Exception as e:
             yield AnswerEvent(kind="error", text=f"Stream interrupted: {e}")
             return
+
+        elapsed_ms = (time.monotonic() - t0) * 1000.0
+        log_usage(
+            settings.data_root,
+            UsageEvent(
+                operation="chat",
+                model=retrieval.chat_model,
+                prompt_tokens=usage_tuple[0],
+                completion_tokens=usage_tuple[1],
+                total_tokens=usage_tuple[2],
+                elapsed_ms=elapsed_ms,
+            ),
+        )
 
         yield AnswerEvent(
             kind="done",

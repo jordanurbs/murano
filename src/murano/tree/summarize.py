@@ -15,9 +15,12 @@ during retrieval/answer time.
 from __future__ import annotations
 
 import re
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
 
+from ..usage import UsageEvent, extract_usage_from_response, log_usage
 from ..vault.chunker import count_tokens
 
 DEFAULT_MAX_CONTEXT_TOKENS = 6000  # cap for a single summarization request
@@ -137,6 +140,7 @@ def summarize_cluster(
     max_tokens: int = DEFAULT_SUMMARY_MAX_TOKENS,
     temperature: float = DEFAULT_TEMPERATURE,
     fallback_title: str = "Untitled cluster",
+    usage_log_dir: Path | None = None,
 ) -> SummarizationResult:
     """Ask Venice for a (title, summary) pair for a cluster of texts."""
     user_prompt, _ = _build_user_prompt(
@@ -145,6 +149,7 @@ def summarize_cluster(
         max_bullet_tokens=max_bullet_tokens,
     )
 
+    t0 = time.monotonic()
     resp = client.chat.completions.create(
         model=chat_model,
         messages=[
@@ -155,6 +160,21 @@ def summarize_cluster(
         max_tokens=max_tokens,
         stream=False,
     )
+    elapsed_ms = (time.monotonic() - t0) * 1000.0
+
+    if usage_log_dir is not None:
+        p, c, t = extract_usage_from_response(resp)
+        log_usage(
+            usage_log_dir,
+            UsageEvent(
+                operation="summarize",
+                model=chat_model,
+                prompt_tokens=p,
+                completion_tokens=c,
+                total_tokens=t,
+                elapsed_ms=elapsed_ms,
+            ),
+        )
 
     raw = resp.choices[0].message.content if resp.choices else ""
     raw = raw or ""

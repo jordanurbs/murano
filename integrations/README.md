@@ -48,9 +48,21 @@ The `env` block is optional — Murano falls back to `~/murano/vault/` and `~/.m
 
 Cursor's MCP settings live at `~/.cursor/mcp.json` (or the project-scoped `.cursor/mcp.json`). Merge in [`cursor/mcp-config.json`](./cursor/mcp-config.json). Reload the window. The tools will be available to the agent in Composer / Chat.
 
+## Codex CLI
+
+Codex CLI's MCP config follows the same standard shape. Merge in [`codex-cli/mcp-config.json`](./codex-cli/mcp-config.json) into Codex's config file (refer to your Codex CLI version's docs for the exact path; recent versions look for an `mcpServers` block in `~/.codex/config.json` or a project-local `.codex/config.json`).
+
+## Hermes Agent
+
+Hermes uses Markdown-based skill files. [`hermes/murano-skill.md`](./hermes/murano-skill.md) is a ready-to-drop-in skill with YAML frontmatter describing both transports (HTTP at `http://localhost:3000/api/v1/*` and MCP over stdio) and a Markdown body explaining when to call each tool, the calling conventions, and failure modes. Copy it into your Hermes skills directory and reference it by name.
+
+## OpenClaw
+
+OpenClaw expects YAML skill manifests. [`openclaw/murano-skill.yaml`](./openclaw/murano-skill.yaml) describes the same five tools with input schemas, transport choices, and the `cite-everything / themes-are-context / don't-write-outside-vault` conventions Murano expects from callers. Adapt the shape if OpenClaw's manifest schema diverges in your version.
+
 ## Other MCP-aware hosts
 
-Every MCP host supports the same `{ "mcpServers": { "<name>": { "command": ..., "args": [...] } } }` shape. The config files in this directory are valid for any of them — Hermes Agent, OpenClaw, Codex CLI, custom hosts, etc. Skill files for Hermes and OpenClaw land in Phase 6.5.
+Every MCP host supports the same `{ "mcpServers": { "<name>": { "command": ..., "args": [...] } } }` shape. The configs in [`claude-desktop/`](./claude-desktop/), [`cursor/`](./cursor/), and [`codex-cli/`](./codex-cli/) are all literally the same JSON — pick whichever lives in the path closest to where you'd paste it.
 
 ## Verifying without a host
 

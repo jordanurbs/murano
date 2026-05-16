@@ -583,6 +583,55 @@ def capture(
     )
 
 
+@app.command("capture-feed")
+def capture_feed_cmd(
+    feed_url: str = typer.Argument(..., help="Absolute URL of an RSS or Atom feed."),
+    limit: int = typer.Option(
+        20, "--limit", help="Maximum number of entries to ingest in one run."
+    ),
+    tags: list[str] = typer.Option(  # noqa: B008
+        [],
+        "--tag",
+        help="Extra tag added to each captured file's frontmatter (alongside `web-capture` and `rss`).",
+    ),
+) -> None:
+    """Capture every new entry in an RSS/Atom feed into the vault.
+
+    State is tracked at ~/.murano/logs/feeds.json so rerunning the same feed
+    only fetches new entries.
+    """
+    from .capture.feed import FeedError, capture_feed
+
+    settings = load_settings()
+    if not settings.vault_root.exists():
+        err_console.print(
+            f"Vault does not exist at [bold]{settings.vault_root}[/]. "
+            "Run [bold]murano init[/] first."
+        )
+        raise typer.Exit(code=1)
+
+    console.print(f"[dim]Fetching feed {feed_url}…[/]")
+    try:
+        report = capture_feed(settings, feed_url, limit=limit, extra_tags=tags or None)
+    except FeedError as e:
+        err_console.print(str(e))
+        raise typer.Exit(code=4) from e
+
+    table = Table(title=f"Feed: {report.feed_title}", show_header=False, header_style="bold cyan")
+    table.add_column("metric", style="dim")
+    table.add_column("value")
+    table.add_row("entries seen", str(report.entries_total))
+    table.add_row("newly captured", str(len(report.captured)))
+    table.add_row("already seen (skipped)", str(len(report.seen)))
+    table.add_row("errors", str(len(report.errors)))
+    console.print(table)
+
+    for r in report.captured:
+        console.print(f"  [green]+[/] {r.title}  [dim]{r.relpath}[/]")
+    for r in report.errors:
+        err_console.print(f"  [red]![/] {r.url} — {r.error}")
+
+
 @app.command()
 def serve(
     host: str = typer.Option(
@@ -653,6 +702,216 @@ def serve(
 
         application = create_app(enable_schedule=schedule, enable_watch=watch)
         uvicorn.run(application, host=host, port=bind_port, log_level="info")
+
+
+@app.command("licenses")
+def licenses_cmd(
+    fail_on_copyleft: bool = typer.Option(
+        True,
+        "--fail-on-copyleft/--no-fail-on-copyleft",
+        help="Exit non-zero if any GPL/AGPL/LGPL package is detected (default: yes).",
+    ),
+    show_all: bool = typer.Option(
+        False,
+        "--all",
+        help="Print every installed package, not just the copyleft ones.",
+    ),
+) -> None:
+    """Audit installed package licenses for copyleft contamination.
+
+    Murano promises 'no GPL/AGPL deps'. This command enforces that.
+    Suitable for CI: it exits non-zero when something copyleft slips in.
+    """
+    from .licenses import audit, copyleft_packages
+
+    pkgs = audit()
+    bad = copyleft_packages(pkgs)
+
+    if show_all:
+        t = Table(title=f"Installed packages ({len(pkgs)})", header_style="bold cyan")
+        t.add_column("package")
+        t.add_column("version")
+        t.add_column("license")
+        t.add_column("flag")
+        for p in pkgs:
+            flag = (
+                f"[red]copyleft[/] ({p.reason})" if p.copyleft else "[green]ok[/]"
+            )
+            t.add_row(p.name, p.version, p.license or "?", flag)
+        console.print(t)
+
+    if not bad:
+        console.print(
+            f"[green]All clear[/] — {len(pkgs)} packages, none flagged as copyleft."
+        )
+        return
+
+    err_table = Table(
+        title=f"Copyleft packages found ({len(bad)})",
+        header_style="bold red",
+    )
+    err_table.add_column("package")
+    err_table.add_column("version")
+    err_table.add_column("license")
+    err_table.add_column("match")
+    for p in bad:
+        err_table.add_row(p.name, p.version, p.license or "?", p.reason or "")
+    err_console.print(err_table)
+
+    if fail_on_copyleft:
+        err_console.print(
+            "[red]exit 5[/] — copyleft contamination detected. "
+            "Run with [bold]--no-fail-on-copyleft[/] to ignore."
+        )
+        raise typer.Exit(code=5)
+
+
+@app.command()
+def export(
+    out: str | None = typer.Option(
+        None,
+        "--out",
+        help="Output .zip path. Defaults to murano-export-YYYYMMDD-HHMMSS.zip in the current dir.",
+    ),
+) -> None:
+    """Export just the Markdown vault as a portable .zip (Obsidian-compatible)."""
+    from .backup import default_export_path, export_vault
+
+    settings = load_settings()
+    target = Path(out) if out else default_export_path(settings, "export")
+    report = export_vault(settings, target)
+    console.print(
+        f"[green]Exported[/] {report.file_count} files "
+        f"({report.total_bytes:,} bytes) -> [bold]{report.out_path}[/] "
+        f"in {report.elapsed_seconds:.2f}s."
+    )
+
+
+@app.command()
+def backup(
+    out: str | None = typer.Option(
+        None,
+        "--out",
+        help="Output .zip path. Defaults to murano-backup-YYYYMMDD-HHMMSS.zip in the current dir.",
+    ),
+    include_usage: bool = typer.Option(
+        True,
+        "--include-usage/--no-include-usage",
+        help="Include the token usage log in the backup.",
+    ),
+) -> None:
+    """Backup the vault + config.toml + usage log (no DBs, no API key)."""
+    from .backup import backup as do_backup
+    from .backup import default_export_path
+
+    settings = load_settings()
+    target = Path(out) if out else default_export_path(settings, "backup")
+    report = do_backup(settings, target, include_usage=include_usage)
+    bits = []
+    if report.included_config:
+        bits.append("config.toml")
+    if report.included_usage_log:
+        bits.append("usage.jsonl")
+    extras = (" + " + " + ".join(bits)) if bits else ""
+    console.print(
+        f"[green]Backed up[/] {report.file_count} files{extras} "
+        f"({report.total_bytes:,} bytes) -> [bold]{report.out_path}[/] "
+        f"in {report.elapsed_seconds:.2f}s."
+    )
+    console.print(
+        "[dim]Excluded by design: chunks.db, summary_tree.db, the Venice API key.[/]"
+    )
+
+
+@app.command()
+def usage(
+    limit: int = typer.Option(
+        20, "--limit", help="How many most-recent events to print in addition to the totals."
+    ),
+    raw: bool = typer.Option(
+        False, "--raw", help="Print the raw usage.jsonl lines instead of a summary."
+    ),
+) -> None:
+    """Summarize Venice token usage logged at ~/.murano/logs/usage.jsonl."""
+    from .usage import iter_usage, summarize
+
+    settings = load_settings()
+    if raw:
+        path = settings.logs_dir / "usage.jsonl"
+        if not path.exists():
+            err_console.print("[yellow]No usage log yet.[/]")
+            return
+        for line in path.read_text(encoding="utf-8").splitlines():
+            console.print(line)
+        return
+
+    events = list(iter_usage(settings.data_root))
+    if not events:
+        err_console.print("[yellow]No usage logged yet.[/]")
+        return
+
+    s = summarize(events)
+    totals = Table(title="Totals", show_header=False, header_style="bold cyan")
+    totals.add_column("metric", style="dim")
+    totals.add_column("value", justify="right")
+    totals.add_row("events", f"{s.total_events:,}")
+    totals.add_row("prompt tokens", f"{s.total_prompt_tokens:,}")
+    totals.add_row("completion tokens", f"{s.total_completion_tokens:,}")
+    totals.add_row("total tokens", f"{s.total_tokens:,}")
+    console.print(totals)
+
+    def _bucket_table(title: str, buckets: dict[str, dict[str, int]]) -> Table:
+        t = Table(title=title, header_style="bold cyan")
+        t.add_column("key")
+        t.add_column("events", justify="right")
+        t.add_column("prompt", justify="right")
+        t.add_column("completion", justify="right")
+        t.add_column("total", justify="right")
+        for k, v in sorted(buckets.items(), key=lambda kv: -kv[1]["total_tokens"]):
+            t.add_row(
+                k,
+                f"{v['events']:,}",
+                f"{v['prompt_tokens']:,}",
+                f"{v['completion_tokens']:,}",
+                f"{v['total_tokens']:,}",
+            )
+        return t
+
+    console.print(_bucket_table("By operation", s.by_operation))
+    console.print(_bucket_table("By model", s.by_model))
+    console.print(_bucket_table("By day", s.by_day))
+
+    if limit > 0:
+        recent = events[-limit:]
+        t = Table(
+            title=f"Most recent {len(recent)} events",
+            header_style="bold cyan",
+        )
+        t.add_column("when")
+        t.add_column("op")
+        t.add_column("model")
+        t.add_column("prompt", justify="right")
+        t.add_column("completion", justify="right")
+        t.add_column("total", justify="right")
+        t.add_column("ms", justify="right")
+        from datetime import datetime as _dt
+
+        for ev in recent:
+            when = (
+                _dt.fromtimestamp(ev.timestamp).strftime("%Y-%m-%d %H:%M:%S")
+                if ev.timestamp > 0
+                else "?"
+            )
+            t.add_row(
+                when,
+                ev.operation,
+                ev.model,
+                f"{ev.prompt_tokens:,}",
+                f"{ev.completion_tokens:,}",
+                f"{ev.total_tokens:,}",
+                f"{ev.elapsed_ms:.0f}" if ev.elapsed_ms is not None else "-",
+            )
+        console.print(t)
 
 
 @tree_app.command("rebuild")

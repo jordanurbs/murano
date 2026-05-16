@@ -168,7 +168,13 @@ class Retriever:
         same query embedding is reused for both lookups — one network call total.
         """
         started = time.monotonic()
-        query_vec = embed_one(self.client, self.resolved.embed.resolved, query)
+        query_vec = embed_one(
+            self.client,
+            self.resolved.embed.resolved,
+            query,
+            usage_log_dir=self.settings.data_root,
+            operation="embed-query",
+        )
         raw_hits = dbmod.search(self.conn, query_vec, k=k)
 
         summaries: list[RetrievedSummary] = []
