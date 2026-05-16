@@ -1,0 +1,85 @@
+[project]
+name = "murano"
+version = "0.1.0"
+description = "Private, local-first personal knowledge base — chat with your Markdown vault via Venice."
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11"
+authors = [{ name = "Murano" }]
+keywords = ["rag", "knowledge-base", "venice", "obsidian", "mcp", "memory"]
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Operating System :: OS Independent",
+    "Development Status :: 3 - Alpha",
+]
+
+dependencies = [
+    "typer>=0.12.0",
+    "rich>=13.7.0",
+    "openai>=1.40.0",
+    "httpx>=0.27.0",
+    "keyring>=25.0.0",
+    "pydantic>=2.7.0",
+    "pydantic-settings>=2.3.0",
+    "tomli-w>=1.0.0",
+    # Phase 2: vault, index, embeddings
+    "sqlite-vec>=0.1.0",
+    "watchfiles>=0.21.0",
+    "tiktoken>=0.7.0",
+]
+
+[project.optional-dependencies]
+# Phase 4: web capture
+capture = [
+    "trafilatura>=1.12.0",
+]
+# Phase 5: hierarchical tree + scheduling
+tree = [
+    "numpy>=1.26.0",
+    "scikit-learn>=1.4.0",
+    "apscheduler>=3.10.0",
+]
+# Phase 6: web UI + REST API
+web = [
+    "fastapi>=0.110.0",
+    "uvicorn[standard]>=0.29.0",
+    "jinja2>=3.1.0",
+    "python-multipart>=0.0.9",
+]
+# Phase 3.5: MCP server
+mcp = [
+    "mcp>=1.0.0",
+]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "ruff>=0.5.0",
+]
+
+[project.scripts]
+murano = "murano.cli:app"
+
+[project.urls]
+Homepage = "https://github.com/aicaptains/murano"
+Repository = "https://github.com/aicaptains/murano"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/murano"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
