@@ -24,6 +24,10 @@ uv pip install -e .
 murano init                    # create ~/murano/vault/ and ~/.murano/
 murano config set-key          # paste your Venice API key (stored in OS keychain)
 murano ping                    # validate connectivity and resolve models
+
+# Drop some .md files into ~/murano/vault/ and:
+murano index                   # embed them
+murano serve --restart         # http://localhost:3000 — chat UI + REST API + nightly tree rebuild
 ```
 
 You should see:
@@ -43,7 +47,7 @@ See [`MURANO_PLAN.md`](./MURANO_PLAN.md) for the full plan and phase breakdown.
 - [x] **Phase 3.5** — MCP server (`mcp` with `search_kb` + `ask_kb` tools; configs in [`integrations/`](./integrations/))
 - [x] **Phase 4** — Web capture (`capture <url>` + `capture_url` MCP tool, auto-indexed)
 - [x] **Phase 5** — Hierarchical summary tree (`tree rebuild/show`, hybrid retrieval, `list_themes` + `get_chunk` MCP tools)
-- [ ] **Phase 6** — Web UI + REST API (`serve` on port 3000)
+- [x] **Phase 6** — Web UI + REST API (`serve` on port 3000, SSE-streamed chat, vault browser, settings, nightly tree rebuild + background watcher)
 - [ ] **Phase 6.5** — Reference skill files (Hermes, OpenClaw)
 - [ ] **Phase 7** — QoL (token tracker, backup, local-embedding fallback)
 

@@ -585,14 +585,74 @@ def capture(
 
 @app.command()
 def serve(
-    restart: bool = typer.Option(  # noqa: ARG001
+    host: str = typer.Option(
+        "127.0.0.1",
+        "--host",
+        help="Address to bind. Defaults to localhost only — change to 0.0.0.0 to expose on the LAN.",
+    ),
+    port: int | None = typer.Option(
+        None,
+        "--port",
+        help="Port to bind. Defaults to the configured web_port (3000).",
+    ),
+    restart: bool = typer.Option(
         False,
         "--restart",
-        help="Kill any prior process on the configured port before starting.",
+        help="Kill any prior process bound to the port + any prior `murano serve` before starting.",
+    ),
+    schedule: bool = typer.Option(
+        True,
+        "--schedule/--no-schedule",
+        help="Run the nightly tree rebuild scheduler.",
+    ),
+    watch: bool = typer.Option(
+        True,
+        "--watch/--no-watch",
+        help="Run the vault file watcher in a background thread so dropped notes auto-index.",
+    ),
+    reload: bool = typer.Option(
+        False,
+        "--reload",
+        help="Hot-reload on source changes (dev only).",
     ),
 ) -> None:
-    """Run the local web UI + REST API on http://localhost:3000. (Phase 6)"""
-    _not_yet("Phase 6", "serve")
+    """Run the local web UI + REST API on http://localhost:3000."""
+    import uvicorn
+
+    from .api.scheduler import kill_port
+
+    settings = load_settings()
+    bind_port = port if port is not None else settings.web_port
+
+    if restart:
+        killed = kill_port(bind_port)
+        console.print(f"[dim]Killed {killed} process(es) on port {bind_port}.[/]")
+
+    console.print(
+        f"[green]Starting Murano[/] on [bold]http://{host}:{bind_port}[/]\n"
+        f"  schedule={'on' if schedule else 'off'}  "
+        f"watch={'on' if watch else 'off'}  "
+        f"reload={'on' if reload else 'off'}"
+    )
+
+    if reload:
+        # Reload needs the import-string form; background workers off so the
+        # reloader's worker processes don't double-up the scheduler.
+        import os
+
+        os.environ["MURANO_ENABLE_SCHEDULE"] = "1" if schedule else "0"
+        os.environ["MURANO_ENABLE_WATCH"] = "1" if watch else "0"
+        uvicorn.run(
+            "murano.api._reload_entry:app",
+            host=host,
+            port=bind_port,
+            reload=True,
+        )
+    else:
+        from .api.server import create_app
+
+        application = create_app(enable_schedule=schedule, enable_watch=watch)
+        uvicorn.run(application, host=host, port=bind_port, log_level="info")
 
 
 @tree_app.command("rebuild")

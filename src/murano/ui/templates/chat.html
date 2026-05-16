@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+
+{% block title %}Chat · Murano{% endblock %}
+
+{% block content %}
+<section class="chat-shell">
+  <form id="ask-form" class="ask-form" autocomplete="off">
+    <textarea
+      id="query"
+      name="query"
+      placeholder="Ask anything about your vault…"
+      rows="2"
+      required
+      autofocus></textarea>
+    <div class="ask-controls">
+      <div class="control-group">
+        <label>chunks (k) <input id="k" name="k" type="number" value="6" min="1" max="20"></label>
+        <label>themes <input id="summary_k" name="summary_k" type="number" value="2" min="0" max="10"></label>
+        <label>max tokens <input id="max_tokens" name="max_tokens" type="number" value="1024" min="16" max="8192" step="16"></label>
+        <label>temp <input id="temperature" name="temperature" type="number" value="0.2" min="0" max="2" step="0.1"></label>
+      </div>
+      <div class="control-actions">
+        <button type="button" id="cancel-btn" class="btn-ghost" disabled>Stop</button>
+        <button type="submit" id="ask-btn" class="btn-primary">Ask</button>
+      </div>
+    </div>
+  </form>
+
+  <div id="retrieval" class="retrieval-panel" hidden>
+    <div class="retrieval-meta"></div>
+    <div class="themes-panel"></div>
+    <div class="hits-panel"></div>
+  </div>
+
+  <article id="answer" class="answer" aria-live="polite"></article>
+
+  <div id="sources" class="sources" hidden>
+    <h3>Sources</h3>
+    <ol id="sources-list"></ol>
+  </div>
+
+  <div id="status" class="status"></div>
+</section>
+{% endblock %}

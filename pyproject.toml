@@ -35,20 +35,15 @@ dependencies = [
     "trafilatura>=1.12.0",
     # Phase 5: hierarchical tree (k-means via numpy, no sklearn)
     "numpy>=1.26.0",
-]
-
-[project.optional-dependencies]
-# Phase 6: scheduled jobs (nightly tree rebuild via `murano serve`)
-schedule = [
-    "apscheduler>=3.10.0",
-]
-# Phase 6: web UI + REST API
-web = [
+    # Phase 6: web UI + REST API + nightly tree rebuild
     "fastapi>=0.110.0",
     "uvicorn[standard]>=0.29.0",
     "jinja2>=3.1.0",
     "python-multipart>=0.0.9",
+    "apscheduler>=3.10.0",
 ]
+
+[project.optional-dependencies]
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
@@ -69,6 +64,10 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/murano"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"src/murano/ui/templates" = "murano/ui/templates"
+"src/murano/ui/static" = "murano/ui/static"
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"
@@ -76,6 +75,12 @@ target-version = "py311"
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "SIM"]
 ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# FastAPI's Depends() is *always* in argument defaults — that's the idiom.
+"src/murano/api/routes.py" = ["B008"]
+"src/murano/api/server.py" = ["B008"]
+"src/murano/ui/routes.py" = ["B008"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

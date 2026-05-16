@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+
+{% block title %}Browse · Murano{% endblock %}
+
+{% block content %}
+<section class="browse-shell">
+  <aside class="browse-sidebar">
+    <div class="browse-actions">
+      <form id="capture-form" class="capture-form">
+        <input type="url" id="capture-url" placeholder="https://example.com/article" required>
+        <button type="submit" class="btn-primary btn-sm">Capture</button>
+      </form>
+      <div id="capture-status" class="status"></div>
+    </div>
+    <h3>Vault</h3>
+    <div id="vault-tree" hx-get="/api/v1/vault/tree" hx-trigger="load" hx-swap="none"></div>
+  </aside>
+  <article class="browse-main">
+    <div id="file-empty" class="empty-state">
+      <p>Select a file from the vault tree to view it here.</p>
+    </div>
+    <div id="file-view" hidden>
+      <header class="file-header">
+        <h2 id="file-path"></h2>
+        <button id="open-in-editor" class="btn-ghost btn-sm" type="button">Open in editor</button>
+      </header>
+      <pre id="file-content" class="file-content"></pre>
+    </div>
+  </article>
+</section>
+{% endblock %}

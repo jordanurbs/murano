@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Murano{% endblock %}</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="https://unpkg.com/htmx.org@2.0.4" defer></script>
+  {% block head_extra %}{% endblock %}
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo-dot"></span>
+      <a href="/" class="brand-name">Murano</a>
+      <span class="tag">local-first knowledge base</span>
+    </div>
+    <nav class="nav">
+      <a href="/" class="{% if page == 'chat' %}active{% endif %}">Chat</a>
+      <a href="/browse" class="{% if page == 'browse' %}active{% endif %}">Browse</a>
+      <a href="/settings" class="{% if page == 'settings' %}active{% endif %}">Settings</a>
+      <a href="/docs" target="_blank" rel="noopener">API</a>
+      <button id="theme-toggle" class="theme-toggle" title="Toggle theme" type="button">
+        <span class="moon">&#9789;</span><span class="sun">&#9728;</span>
+      </button>
+    </nav>
+  </header>
+
+  <main class="main">
+    {% block content %}{% endblock %}
+  </main>
+
+  <footer class="footer">
+    <span>vault: <code>{{ settings.vault_root }}</code></span>
+    <span>chat: <code>{{ settings.chat_model }}</code></span>
+    <span>embed: <code>{{ settings.embed_model }}</code></span>
+  </footer>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

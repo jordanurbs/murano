@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+
+{% block title %}Settings · Murano{% endblock %}
+
+{% block content %}
+<section class="settings-shell">
+  <h1>Settings</h1>
+
+  <div class="card">
+    <h2>Paths</h2>
+    <dl class="kv">
+      <dt>Vault root</dt><dd><code>{{ settings.vault_root }}</code></dd>
+      <dt>Data root</dt><dd><code>{{ settings.data_root }}</code></dd>
+      <dt>Config file</dt><dd><code>{{ settings.config_path }}</code></dd>
+      <dt>Chunks DB</dt><dd><code>{{ settings.chunks_db }}</code></dd>
+      <dt>Tree DB</dt><dd><code>{{ settings.summary_tree_db }}</code></dd>
+      <dt>Logs</dt><dd><code>{{ settings.logs_dir }}</code></dd>
+    </dl>
+  </div>
+
+  <div class="card">
+    <h2>Models</h2>
+    <dl class="kv">
+      <dt>Chat model</dt><dd><code>{{ settings.chat_model }}</code></dd>
+      <dt>Embed model</dt><dd><code>{{ settings.embed_model }}</code></dd>
+      <dt>Venice base URL</dt><dd><code>{{ settings.venice_base_url }}</code></dd>
+      <dt>API key</dt><dd>
+        {% if api_key_present %}
+          <span class="status-ok">stored in OS keychain</span>
+        {% else %}
+          <span class="status-err">not set</span> — run <code>murano config set-key</code>
+        {% endif %}
+      </dd>
+    </dl>
+    <div class="actions">
+      <button class="btn-ghost" type="button" id="ping-btn">Test connection</button>
+      <span id="ping-result" class="status"></span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Index</h2>
+    <dl class="kv">
+      <dt>Files indexed</dt><dd>{{ file_count }}</dd>
+      <dt>Chunks</dt><dd>{{ chunk_count }}</dd>
+    </dl>
+    <div class="actions">
+      <button class="btn-ghost" type="button" id="reindex-btn">Re-index vault</button>
+      <span id="reindex-result" class="status"></span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Summary tree</h2>
+    {% if tree_status.exists %}
+      <dl class="kv">
+        <dt>Nodes</dt><dd>{{ tree_status.node_count }}</dd>
+        <dt>Levels</dt><dd>{{ tree_status.levels | join(', ') }}</dd>
+        <dt>Source chunks</dt><dd>{{ tree_status.source_chunk_count }}</dd>
+        <dt>Status</dt><dd>
+          {% if tree_status.is_stale %}
+            <span class="status-warn">stale</span> — {{ tree_status.stale_reason }}
+          {% else %}
+            <span class="status-ok">fresh</span>
+          {% endif %}
+        </dd>
+      </dl>
+    {% else %}
+      <p class="muted">No summary tree built yet.</p>
+    {% endif %}
+    <div class="actions">
+      <button class="btn-ghost" type="button" id="rebuild-tree-btn">Rebuild tree</button>
+      <span id="rebuild-tree-result" class="status"></span>
+    </div>
+  </div>
+</section>
+{% endblock %}
