@@ -23,6 +23,10 @@ from ..config import Settings
 from .web import CapturedPage, CaptureError, capture_url
 
 DEFAULT_LIMIT = 20
+# Upper bound on how many feed entries we'll *consider* per run. Beyond this,
+# we stop scanning even if `limit` hasn't been reached — protects against
+# pathological feeds with thousands of items.
+MAX_ENTRIES_TO_SCAN = 500
 STATE_FILENAME = "feeds.json"
 
 _logger = logging.getLogger("murano.capture.feed")
@@ -114,7 +118,13 @@ def capture_feed(
         reason = str(getattr(parsed, "bozo_exception", "unknown parse error"))
         raise FeedError(f"Failed to parse feed {feed_url}: {reason}")
 
-    entries = list(getattr(parsed, "entries", []))[:limit]
+    # IMPORTANT: do NOT slice entries by `limit` here. The audit found that
+    # `entries[:limit]` blocks later entries when an earlier entry is
+    # permanently broken — with `--limit 1`, the same failing entry gets
+    # retried every run and the rest of the feed is unreachable. Instead,
+    # we walk ALL entries (capped by a hard MAX_ENTRIES_TO_SCAN below) and
+    # stop after attempting `limit` *new* (not-yet-seen) ones.
+    all_entries = list(getattr(parsed, "entries", []))
     feed_title = (
         (parsed.feed.get("title") if hasattr(parsed.feed, "get") else getattr(parsed.feed, "title", ""))
         or feed_url
@@ -136,8 +146,11 @@ def capture_feed(
     if "rss" not in tags:
         tags.append("rss")
 
-    report = FeedReport(feed_url=feed_url, feed_title=feed_title, entries_total=len(entries))
-    for entry in entries:
+    report = FeedReport(feed_url=feed_url, feed_title=feed_title, entries_total=len(all_entries))
+    attempts = 0  # number of NEW (not-yet-seen) entries we've tried to capture
+    for entry in all_entries[:MAX_ENTRIES_TO_SCAN]:
+        if attempts >= limit:
+            break
         link = _entry_link(entry)
         eid = _entry_id(entry) or (link or "")
         title = entry.get("title", "") if isinstance(entry, dict) else getattr(entry, "title", "")
@@ -145,16 +158,29 @@ def capture_feed(
             report.errors.append(
                 FeedEntryResult(url="", title=title, status="error", error="No link in entry")
             )
+            # Linkless entries don't count against `limit` — they're malformed,
+            # and counting them would let a feed publisher starve us by
+            # putting `limit` linkless entries at the top.
             continue
         if eid in seen_set:
             report.seen.append(FeedEntryResult(url=link, title=title, status="seen"))
+            # Already-seen entries don't count against `limit` either; we want
+            # `limit` to mean "try `limit` *new* things this run".
             continue
+
+        # This is a NEW entry — we will attempt it whether it succeeds or fails.
+        attempts += 1
         try:
             page: CapturedPage = capture_fn(settings, link, extra_tags=tags)
         except CaptureError as e:
             report.errors.append(
                 FeedEntryResult(url=link, title=title, status="error", error=str(e))
             )
+            # NOTE: we do NOT add `eid` to seen_set on failure. A transient
+            # network error should be retried next run. Persistently-broken
+            # entries will keep failing, but each run also moves on to other
+            # entries (because `attempts` is incremented above) so they no
+            # longer starve the feed.
             continue
         report.captured.append(
             FeedEntryResult(

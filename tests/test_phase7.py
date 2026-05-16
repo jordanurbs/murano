@@ -181,6 +181,38 @@ def test_backup_skips_usage_when_disabled(settings: Settings, tmp_path: Path) ->
         assert "murano/logs/usage.jsonl" not in zf.namelist()
 
 
+def test_export_and_backup_drop_symlinks_pointing_outside_vault(
+    settings: Settings, tmp_path: Path
+) -> None:
+    """Audit-3 must-fix: backup zip used to dereference symlinks and copy
+    out-of-vault bytes into the archive under a vault-relative name."""
+    tmp_path = tmp_path.resolve()
+    _seed_vault(settings)
+    secret = tmp_path / "outside-secret.md"
+    secret.write_text("OUTSIDE SECRET — must never appear in a backup zip")
+    # Symlink inside the vault pointing at the outside-vault secret.
+    (settings.vault_root / "leaked.md").symlink_to(secret)
+
+    for fn, name in (
+        (backup_mod.export_vault, "export"),
+        (lambda s, o: backup_mod.backup(s, o, include_usage=False), "backup"),
+    ):
+        out = tmp_path / f"{name}.zip"
+        fn(settings, out)
+        with zipfile.ZipFile(out) as zf:
+            entries = zf.namelist()
+            # The symlinked file must not be in the zip at all.
+            assert "vault/leaked.md" not in entries, (
+                f"{name}: leaked.md was included; got {entries}"
+            )
+            # Defense in depth: confirm the secret bytes did not appear under
+            # any path.
+            for entry in entries:
+                assert "OUTSIDE SECRET" not in zf.read(entry).decode(
+                    "utf-8", errors="replace"
+                ), f"{name}: outside-vault content leaked into {entry}"
+
+
 # ---------- licenses ----------
 
 
@@ -404,6 +436,109 @@ def test_capture_feed_seen_ids_trim_is_deterministic_fifo(
     )
     state2 = feed_mod._load_state(settings)
     assert state2[feed_url]["seen_ids"] == seen, "trim must be deterministic"
+
+
+def test_capture_feed_broken_entry_does_not_starve_later_entries(
+    settings: Settings, tmp_path: Path
+) -> None:
+    """Audit-3 should-fix: previously `entries[:limit]` was applied BEFORE the
+    seen/error filter, so with `--limit 1` a permanently-broken first entry
+    would be retried every run and the rest of the feed was unreachable.
+    Now we treat `limit` as 'NEW captures to ATTEMPT' so a broken entry
+    counts against the budget and we move on to the next entries."""
+    parsed = _FakeParsed(
+        entries=[
+            _FakeEntry("https://example.com/broken-1", "Broken 1", "id-broken-1"),
+            _FakeEntry("https://example.com/broken-2", "Broken 2", "id-broken-2"),
+            _FakeEntry("https://example.com/good-3", "Good 3", "id-good-3"),
+            _FakeEntry("https://example.com/good-4", "Good 4", "id-good-4"),
+        ],
+        feed_title="Mixed feed",
+    )
+
+    from murano.capture.web import CaptureError
+
+    def fake_capture(_s, url, *, extra_tags=None):  # noqa: ARG001
+        if "broken" in url:
+            raise CaptureError(f"simulated permanent failure for {url}")
+        return CapturedPage(
+            url=url, title="ok", relpath=f"web-captures/{url.rsplit('/', 1)[-1]}.md",
+            absolute_path=tmp_path / "x.md", word_count=1, byte_count=1,
+            site_name=None, published_date=None,
+        )
+
+    # With limit=2, the previous slicing-first behavior would attempt only
+    # the two broken entries and never reach the good ones. The fix should
+    # report 2 errors (the broken ones) and stop after attempting `limit`
+    # new entries — meaning the good entries get a shot on the *next* run.
+    report = feed_mod.capture_feed(
+        settings, "https://example.com/feed.xml", limit=2,
+        parser=lambda _url: parsed, capture_fn=fake_capture,
+    )
+    assert len(report.errors) == 2, "both broken entries should be attempted"
+    assert len(report.captured) == 0
+    # Critical: broken entries were NOT added to seen_set, so a re-run with
+    # higher limit will retry them AND see the good ones too. (We mostly care
+    # that they didn't starve future entries when limit is raised.)
+    report2 = feed_mod.capture_feed(
+        settings, "https://example.com/feed.xml", limit=4,
+        parser=lambda _url: parsed, capture_fn=fake_capture,
+    )
+    captured_urls = {r.url for r in report2.captured}
+    error_urls = {r.url for r in report2.errors}
+    assert "https://example.com/good-3" in captured_urls, (
+        f"good entries must be reachable; captured={captured_urls} errors={error_urls}"
+    )
+    assert "https://example.com/good-4" in captured_urls
+
+
+def test_capture_feed_skipped_seen_entries_dont_eat_limit_budget(
+    settings: Settings, tmp_path: Path
+) -> None:
+    """Audit-3 should-fix: if `limit` was 'entries to scan', a backlog of
+    already-seen entries at the top of a feed would consume the whole
+    budget before reaching any new ones. Now seen-entries are skipped
+    cheaply and don't count against limit."""
+    # Pre-seed 5 seen entries via state.
+    state_path = settings.logs_dir / feed_mod.STATE_FILENAME
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    import json as _json
+    state_path.write_text(
+        _json.dumps({
+            "https://example.com/feed.xml": {
+                "seen_ids": [f"old-{i}" for i in range(5)],
+                "feed_title": "Backlog feed",
+            }
+        }),
+        encoding="utf-8",
+    )
+
+    parsed = _FakeParsed(
+        entries=[
+            _FakeEntry(f"https://example.com/old-{i}", f"Old {i}", f"old-{i}")
+            for i in range(5)
+        ] + [
+            _FakeEntry(f"https://example.com/new-{i}", f"New {i}", f"new-{i}")
+            for i in range(3)
+        ],
+        feed_title="Backlog feed",
+    )
+
+    def fake_capture(_s, url, *, extra_tags=None):  # noqa: ARG001
+        return CapturedPage(
+            url=url, title="t", relpath=f"web-captures/{url.rsplit('/', 1)[-1]}.md",
+            absolute_path=tmp_path / "x.md", word_count=1, byte_count=1,
+            site_name=None, published_date=None,
+        )
+
+    # limit=2: should skip the 5 old entries (which don't count against limit)
+    # and capture exactly 2 of the new ones.
+    report = feed_mod.capture_feed(
+        settings, "https://example.com/feed.xml", limit=2,
+        parser=lambda _url: parsed, capture_fn=fake_capture,
+    )
+    assert len(report.captured) == 2
+    assert len(report.seen) == 5
 
 
 def test_capture_feed_legacy_set_state_is_coerced_to_list(

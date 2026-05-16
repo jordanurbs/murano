@@ -58,6 +58,10 @@ def page_browse(request: Request, settings: Settings = Depends(get_settings)):
 
 @router.get("/settings", response_class=HTMLResponse)
 def page_settings(request: Request, settings: Settings = Depends(get_settings)):
+    # Local import to avoid a circular dep (api/routes imports ui/routes
+    # indirectly via the app factory). The helper is small.
+    from ..api.routes import _effective_api_key_source
+
     chunk_n = 0
     file_n = 0
     if settings.chunks_db.exists():
@@ -74,7 +78,14 @@ def page_settings(request: Request, settings: Settings = Depends(get_settings)):
         {
             "settings": settings,
             "page": "settings",
+            # Legacy: True iff the keychain has a Venice key. Kept for any
+            # third-party UI that templates against this value.
             "api_key_present": bool(get_api_key()),
+            # Audit fix: the keychain isn't the only key source. Show the
+            # *effective* source so users on MURANO_VENICE_BASE_URL +
+            # MURANO_API_KEY don't see a misleading "not set" prompt to run
+            # `murano config set-key`.
+            "api_key_source": _effective_api_key_source(settings),
             "chunk_count": chunk_n,
             "file_count": file_n,
             "tree_status": tree_status,

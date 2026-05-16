@@ -433,6 +433,24 @@ def test_vault_tree_lists_markdown_only(client: TestClient, vault_env: Settings)
     assert "ignore.txt" not in names
 
 
+def test_vault_tree_handles_symlink_to_outside_directory(
+    client: TestClient, vault_env: Settings, tmp_path: Path
+) -> None:
+    """Audit-3 should-fix: a symlinked directory inside the vault pointing
+    outside used to 500 the unauthenticated browser. Now it's skipped."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.md").write_text("# Out of vault")
+    (vault_env.vault_root / "linkdir").symlink_to(outside)
+
+    r = client.get("/api/v1/vault/tree")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    names = {e["name"] for e in body["entries"]}
+    # The symlinked dir must not appear in the listing.
+    assert "linkdir" not in names, body
+
+
 def test_vault_file_returns_content(client: TestClient) -> None:
     r = client.get("/api/v1/vault/file?path=cooking/risotto.md")
     assert r.status_code == 200
@@ -471,6 +489,24 @@ def test_pages_render_with_200(client: TestClient) -> None:
         r = client.get(path)
         assert r.status_code == 200, path
         assert "Murano" in r.text
+
+
+def test_settings_page_reflects_env_key_source(
+    monkeypatch: pytest.MonkeyPatch, client: TestClient
+) -> None:
+    """Audit-3 should-fix: the settings template told the user to run
+    `murano config set-key` even when the active config was a custom
+    base URL + MURANO_API_KEY (an entirely valid setup). It must now
+    reflect the effective key source."""
+    monkeypatch.setenv("MURANO_VENICE_BASE_URL", "http://localhost:11434/v1")
+    monkeypatch.setenv("MURANO_API_KEY", "local-token")
+    r = client.get("/settings")
+    assert r.status_code == 200
+    body = r.text
+    assert "MURANO_API_KEY" in body
+    assert "http://localhost:11434/v1" in body
+    # Must NOT prompt the user to run set-key when env auth is in effect.
+    assert "murano config set-key" not in body
 
 
 def test_static_assets_load(client: TestClient) -> None:

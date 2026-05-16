@@ -106,6 +106,12 @@ def _section_iter(
     stack: list[tuple[int, str]] = []
     buf: list[str] = []
     buf_start = 0
+    # `cursor` and `buf_start` are *byte* offsets into the UTF-8 encoding of
+    # the body. We track bytes (not characters) so consumers can seek into
+    # the underlying file with the offset directly; previously this was a
+    # character count, which silently desynced on non-ASCII content.
+    # (Audit-3 caught: `éééé\n# H\nbody` reported offset 5 for content at
+    # UTF-8 byte 13.)
     cursor = 0
 
     def flush() -> None:
@@ -114,18 +120,22 @@ def _section_iter(
             sections.append((_build_heading_path(stack, frontmatter_title), body, buf_start))
 
     for line in lines:
+        line_byte_len = len(line.encode("utf-8"))
         m = _HEADING_RE.match(line)
         if m and len(m.group(1)) <= split_max_level:
             flush()
             buf = []
-            buf_start = cursor + len(line) - len(line.lstrip(" \t"))
+            # Body of the new section starts AFTER the heading line itself,
+            # in BYTES. Counting in bytes (not characters) matters whenever
+            # the file contains non-ASCII content above the heading.
+            buf_start = cursor + line_byte_len
             level = len(m.group(1))
             title = m.group(2).strip()
             stack = [(lvl, t) for lvl, t in stack if lvl < level]
             stack.append((level, title))
         else:
             buf.append(line)
-        cursor += len(line)
+        cursor += line_byte_len
 
     flush()
 

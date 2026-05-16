@@ -46,6 +46,13 @@
 
     let currentController = null;
     let lastHits = [];
+    // Citation tokens (`[[file#heading]]`) often arrive split across multiple
+    // SSE deltas (the model streams "[[file" + "#h]]" in separate chunks).
+    // We keep a carry buffer of unflushed tail text so we can detect a half-
+    // open `[[` and hold its bytes until the matching `]]` arrives.
+    // (Audit found that the previous per-delta parser dropped these
+    // citations to plain text.)
+    let answerCarry = "";
 
     askForm.addEventListener("submit", async (e) => {
       e.preventDefault();
@@ -75,6 +82,7 @@
       askBtn.disabled = true;
       cancelBtn.disabled = false;
       lastHits = [];
+      answerCarry = "";
 
       const body = {
         query,
@@ -140,6 +148,12 @@
       } else if (event === "delta") {
         appendAnswerText(data.text);
       } else if (event === "done") {
+        // Flush any unfinished tail (e.g. the model produced trailing `[[`
+        // and the stream ended; render it as plain text rather than swallow it).
+        if (answerCarry) {
+          answerEl.append(document.createTextNode(answerCarry));
+          answerCarry = "";
+        }
         renderSources(lastHits, data.cited || []);
         setStatus(`Done — ${data.finish_reason || "complete"}.`, "is-ok");
       } else if (event === "error") {
@@ -148,19 +162,38 @@
     }
 
     function appendAnswerText(piece) {
-      // Tokenize into [text, citation, text, citation, ...] preserving order
+      // Append to the carry buffer; then peel off the longest prefix that
+      // contains zero in-flight `[[` openings. Render that prefix; keep the
+      // rest of the buffer (any half-open `[[...`) for the next delta.
+      let buf = answerCarry + piece;
       const re = /\[\[([^\[\]]+?)\]\]/g;
-      let last = 0;
+      let lastEnd = 0;
+      let renderedUpTo = 0;
       let m;
-      while ((m = re.exec(piece)) !== null) {
-        if (m.index > last) {
-          answerEl.append(document.createTextNode(piece.slice(last, m.index)));
+      while ((m = re.exec(buf)) !== null) {
+        // Plain text between the previous citation (or start) and this one.
+        if (m.index > lastEnd) {
+          answerEl.append(document.createTextNode(buf.slice(lastEnd, m.index)));
         }
         answerEl.append(makeCitation(m[1]));
-        last = m.index + m[0].length;
+        lastEnd = m.index + m[0].length;
+        renderedUpTo = lastEnd;
       }
-      if (last < piece.length) {
-        answerEl.append(document.createTextNode(piece.slice(last)));
+      // Anything after the last complete citation MIGHT be the start of
+      // another citation that's split across deltas. If we can prove it
+      // contains no open `[[`, render it now; otherwise hold it in the carry.
+      const tail = buf.slice(renderedUpTo);
+      const lastOpen = tail.lastIndexOf("[[");
+      if (lastOpen === -1) {
+        // No half-open token in the tail — safe to flush everything.
+        if (tail) answerEl.append(document.createTextNode(tail));
+        answerCarry = "";
+      } else {
+        // Render up to (but not including) the half-open `[[`, hold the rest.
+        if (lastOpen > 0) {
+          answerEl.append(document.createTextNode(tail.slice(0, lastOpen)));
+        }
+        answerCarry = tail.slice(lastOpen);
       }
     }
 

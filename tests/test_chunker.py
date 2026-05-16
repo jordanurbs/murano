@@ -114,3 +114,29 @@ def test_count_tokens_and_file_hash_basics() -> None:
     assert count_tokens("hello world") >= 1
     assert file_hash("abc") == file_hash("abc")
     assert file_hash("abc") != file_hash("abd")
+
+
+def test_byte_offsets_are_true_utf8_bytes_not_characters() -> None:
+    """Audit-3 should-fix: the chunker advanced `cursor` by `len(line)`
+    (character count). For non-ASCII content above a heading, that desynced
+    from real UTF-8 byte positions. After the fix, byte_offset points at
+    the *body* of the section in real UTF-8 bytes.
+
+    Reproducer text from the auditor:
+        'éééé\\n# H\\nbody'
+    UTF-8 bytes: éééé = 8 bytes, \\n = 1 (=9), # H = 3 (=12), \\n = 1 (=13),
+    body = 4 (=17). The 'body' content begins at byte 13.
+    """
+    text = "éééé\n# H\nbody"
+    body_bytes = text.encode("utf-8")
+    assert len(body_bytes) == 17
+
+    chunks = chunk_markdown(text)
+    # The H section's body must start at UTF-8 byte 13 (== position of 'body').
+    h_chunk = next(c for c in chunks if c.heading_path == "H")
+    assert h_chunk.byte_offset == 13, (
+        f"expected byte_offset to point at the 'body' UTF-8 byte (13); "
+        f"got {h_chunk.byte_offset}. The chunker was using character offsets."
+    )
+    # Sanity: read the file at that offset and verify the content starts there.
+    assert body_bytes[h_chunk.byte_offset:].decode("utf-8").startswith("body")

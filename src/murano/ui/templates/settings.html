@@ -25,10 +25,17 @@
       <dt>Embed model</dt><dd><code>{{ settings.embed_model }}</code></dd>
       <dt>Venice base URL</dt><dd><code>{{ settings.venice_base_url }}</code></dd>
       <dt>API key</dt><dd>
-        {% if api_key_present %}
-          <span class="status-ok">stored in OS keychain</span>
+        {% if api_key_source == 'keychain' %}
+          <span class="status-ok">stored in OS keychain</span> (sent to <code>api.venice.ai</code>)
+        {% elif api_key_source == 'env' %}
+          <span class="status-ok">from <code>MURANO_API_KEY</code></span> (sent to <code>{{ settings.venice_base_url }}</code>; the keychain Venice key is never sent to non-Venice hosts)
         {% else %}
-          <span class="status-err">not set</span> — run <code>murano config set-key</code>
+          <span class="status-err">not set</span> &mdash;
+          {% if settings.venice_base_url.startswith('https://api.venice.ai') %}
+            run <code>murano config set-key</code>
+          {% else %}
+            set <code>MURANO_API_KEY</code> in the environment for <code>{{ settings.venice_base_url }}</code>, or unset <code>MURANO_VENICE_BASE_URL</code> to use Venice with the keychain key
+          {% endif %}
         {% endif %}
       </dd>
     </dl>

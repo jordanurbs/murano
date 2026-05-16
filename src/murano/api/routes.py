@@ -306,8 +306,15 @@ def _ask_event_stream(settings: Settings, body: schemas.AskRequest) -> Iterator[
         yield _sse("error", {"text": str(e)})
     except VeniceConnectionError as e:
         yield _sse("error", {"text": str(e)})
-    except Exception as e:  # last-resort surface
-        yield _sse("error", {"text": f"{type(e).__name__}: {e}"})
+    except Exception as e:
+        # Audit-3 fix: don't echo type(e).__name__ or str(e) to clients on
+        # the last-resort path — they can leak absolute paths and internal
+        # type names to anyone on the LAN if the operator bound non-loopback.
+        # Server-side log captures the full traceback for the operator.
+        import logging as _logging
+
+        _logging.getLogger("murano.api").exception("Unhandled error in /api/v1/ask: %s", e)
+        yield _sse("error", {"text": "Internal server error. Check server logs."})
 
 
 @router.post("/ask")
@@ -420,22 +427,39 @@ def ping(settings: Settings = Depends(get_settings)):
 
 @router.get("/vault/tree")
 def vault_tree(settings: Settings = Depends(get_settings)):
-    """Return a nested directory listing of the vault, Markdown files only."""
+    """Return a nested directory listing of the vault, Markdown files only.
+
+    Symlinks pointing outside the vault (files or dirs) are silently skipped,
+    not 500'd. (Audit found that a vault-internal symlinked dir crashed the
+    unauthenticated browser endpoint.)
+    """
     vault = settings.vault_root.resolve()
     if not vault.exists():
         return {"vault_root": str(vault), "entries": []}
+
+    def _resolve_inside(p: Path) -> Path | None:
+        """Resolve p; return it only if it stays inside the vault."""
+        try:
+            resolved = p.resolve()
+            resolved.relative_to(vault)
+        except (OSError, ValueError):
+            return None
+        return resolved
 
     def walk(d: Path) -> list[dict]:
         entries: list[dict] = []
         for child in sorted(d.iterdir()):
             if child.name.startswith("."):
                 continue
-            if child.is_dir():
-                kids = walk(child)
+            resolved = _resolve_inside(child)
+            if resolved is None:
+                continue  # symlink escapes; drop silently
+            if resolved.is_dir():
+                kids = walk(resolved)
                 if kids:
                     entries.append({"type": "dir", "name": child.name, "children": kids})
-            elif child.is_file() and child.suffix.lower() in (".md", ".markdown"):
-                rel = child.resolve().relative_to(vault)
+            elif resolved.is_file() and resolved.suffix.lower() in (".md", ".markdown"):
+                rel = resolved.relative_to(vault)
                 entries.append({"type": "file", "name": child.name, "path": str(rel)})
         return entries
 

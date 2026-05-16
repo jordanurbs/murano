@@ -167,12 +167,16 @@ def stop_background_workers(handles: SchedulerHandles) -> None:
 def kill_port(port: int) -> int:
     """Best-effort port-killer for `murano serve --restart` (and scripts/dev.sh).
 
-    Returns the count of processes killed.
+    Returns the count of processes killed. Failures are debug-logged so
+    `--restart didn't free port 3000` is diagnosable; we never raise from
+    here because the caller is about to try binding the port anyway and
+    will get a clearer error if the kill genuinely failed.
     """
     import platform
     import signal
     import subprocess
 
+    _kp_log = logging.getLogger("murano.kill_port")
     system = platform.system()
     killed = 0
     if system in {"Darwin", "Linux"}:
@@ -190,10 +194,11 @@ def kill_port(port: int) -> int:
 
                     os.kill(pid, signal.SIGKILL)
                     killed += 1
-                except (ProcessLookupError, PermissionError):
-                    pass
+                    _kp_log.debug("killed pid %d holding port %d", pid, port)
+                except (ProcessLookupError, PermissionError) as e:
+                    _kp_log.debug("could not kill pid %d on port %d: %s", pid, port, e)
         except FileNotFoundError:
-            pass
+            _kp_log.debug("lsof not available; cannot kill port %d", port)
     elif system == "Windows":  # pragma: no cover
         try:
             out = subprocess.run(
@@ -207,8 +212,9 @@ def kill_port(port: int) -> int:
                         ["taskkill", "/F", "/PID", pid], check=False, capture_output=True
                     )
                     killed += 1
+                    _kp_log.debug("killed pid %s holding port %d (windows)", pid, port)
         except FileNotFoundError:
-            pass
+            _kp_log.debug("netstat not available; cannot kill port %d", port)
 
     # We deliberately do NOT run `pkill -f 'murano serve'` as a fallback,
     # even though earlier versions did. The substring match was too broad:

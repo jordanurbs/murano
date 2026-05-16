@@ -13,16 +13,24 @@ Two related operations:
 
 Both produce a single .zip file. We deliberately avoid tar.gz because zip is
 universally readable on macOS, Windows, and Linux without extra tools.
+
+Symlink policy (audit-fix): a Markdown symlink inside the vault that resolves
+to a file *outside* the vault is silently skipped, NOT followed. Previously
+zip.write() would dereference the symlink and copy the target's bytes into
+the zip under the vault-relative name — the same class of escape the indexer
+was hardened against.
 """
 
 from __future__ import annotations
 
+import logging
 import time
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
 from .config import Settings
+from .security import VaultPathError, relpath_in_vault
 
 VAULT_GLOBS: tuple[str, ...] = ("*.md", "*.markdown")
 NEVER_INCLUDE_NAMES = {
@@ -36,6 +44,8 @@ NEVER_INCLUDE_NAMES = {
     "summary_tree.db-shm",
 }
 
+_logger = logging.getLogger("murano.backup")
+
 
 @dataclass
 class BackupReport:
@@ -48,15 +58,38 @@ class BackupReport:
 
 
 def _iter_vault_files(vault_root: Path):
-    """All Markdown files in the vault, hidden dirs skipped."""
+    """All Markdown files in the vault, hidden dirs skipped.
+
+    Symlinks that resolve outside the vault are dropped on the floor —
+    we never want zip.write() to follow them and copy out-of-vault bytes
+    into the backup under a vault-relative name. (Audit found this in
+    round 3; same class as the round-1 indexer fix.)
+    """
+    vault_resolved = vault_root.resolve()
     for child in sorted(vault_root.rglob("*")):
-        if not child.is_file():
+        # Resolve THIS candidate and verify it's a real descendant of vault.
+        try:
+            resolved = child.resolve()
+            rel = resolved.relative_to(vault_resolved)
+        except (OSError, ValueError):
+            _logger.debug("skipping out-of-vault path: %s", child)
             continue
-        if any(part.startswith(".") for part in child.relative_to(vault_root).parts):
+        # Check is_file() on the *resolved* path so dangling symlinks die here.
+        if not resolved.is_file():
             continue
-        if not any(child.match(g) for g in VAULT_GLOBS):
+        if any(part.startswith(".") for part in rel.parts):
             continue
-        yield child
+        if not any(resolved.match(g) for g in VAULT_GLOBS):
+            continue
+        yield resolved
+
+
+def _safe_arcname(vault_root: Path, resolved_file: Path) -> str | None:
+    """Return the vault-relative POSIX path for zip arcname, or None to skip."""
+    try:
+        return "vault/" + relpath_in_vault(vault_root, resolved_file).replace("\\", "/")
+    except VaultPathError:
+        return None
 
 
 def export_vault(settings: Settings, out_path: Path) -> BackupReport:
@@ -68,8 +101,10 @@ def export_vault(settings: Settings, out_path: Path) -> BackupReport:
     total = 0
     with zipfile.ZipFile(out_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         for src in _iter_vault_files(settings.vault_root):
-            rel = src.relative_to(settings.vault_root)
-            zf.write(src, arcname=str(Path("vault") / rel))
+            arcname = _safe_arcname(settings.vault_root, src)
+            if arcname is None:  # symlink escaped during the race; skip
+                continue
+            zf.write(src, arcname=arcname)
             n += 1
             total += src.stat().st_size
     return BackupReport(
@@ -96,8 +131,10 @@ def backup(settings: Settings, out_path: Path, include_usage: bool = True) -> Ba
     included_usage = False
     with zipfile.ZipFile(out_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
         for src in _iter_vault_files(settings.vault_root):
-            rel = src.relative_to(settings.vault_root)
-            zf.write(src, arcname=str(Path("vault") / rel))
+            arcname = _safe_arcname(settings.vault_root, src)
+            if arcname is None:
+                continue
+            zf.write(src, arcname=arcname)
             n += 1
             total += src.stat().st_size
 
