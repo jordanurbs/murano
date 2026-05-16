@@ -56,8 +56,8 @@ dev = [
 murano = "murano.cli:app"
 
 [project.urls]
-Homepage = "https://github.com/aicaptains/murano"
-Repository = "https://github.com/aicaptains/murano"
+Homepage = "https://github.com/jordanurbs/murano"
+Repository = "https://github.com/jordanurbs/murano"
 
 [build-system]
 requires = ["hatchling"]

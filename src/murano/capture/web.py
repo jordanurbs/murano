@@ -39,7 +39,7 @@ import trafilatura
 from ..config import Settings
 from ..security import UnsafeURLError, assert_public_http_url
 
-USER_AGENT = "murano/0.1 (+https://github.com/aicaptains/murano)"
+USER_AGENT = "murano/0.1 (+https://github.com/jordanurbs/murano)"
 DEFAULT_TIMEOUT = 20.0
 WEB_CAPTURE_SUBDIR = "web-captures"
 DEFAULT_TAGS: tuple[str, ...] = ("web-capture",)

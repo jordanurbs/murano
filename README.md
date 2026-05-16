@@ -15,7 +15,7 @@ No backend service. No telemetry. By default the only outbound call is to `api.v
 Requires **Python 3.11+** and [`uv`](https://github.com/astral-sh/uv).
 
 ```bash
-git clone https://github.com/aicaptains/murano.git
+git clone https://github.com/jordanurbs/murano.git
 cd murano
 uv venv && source .venv/bin/activate
 uv pip install -e .

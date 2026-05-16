@@ -32,7 +32,7 @@ You do **not** need:
 ## 1. Get the code
 
 ```bash
-git clone https://github.com/aicaptains/murano.git
+git clone https://github.com/jordanurbs/murano.git
 cd murano
 ```
 
