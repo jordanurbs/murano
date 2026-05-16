@@ -4,14 +4,16 @@ Exposes Murano's vault retrieval and RAG answer pipeline as MCP tools over stdio
 so any MCP-aware agent framework (Claude Desktop, Cursor, Hermes, OpenClaw,
 Codex CLI, etc.) can use Murano as its persistent memory layer.
 
-Tools exposed in this phase (per MURANO_PLAN.md §10):
+Tools exposed (per MURANO_PLAN.md §10):
     - search_kb(query, k=10) : top-K chunks with citations, no LLM call
     - ask_kb(query, k=6)     : full RAG answer with Obsidian-style citations
                                (synchronous from MCP's perspective; under the
                                hood it still streams from Venice and buffers)
+    - capture_url(url, tags) : fetch a URL with trafilatura and write a
+                               Markdown file with YAML frontmatter into the
+                               vault; auto-indexes the new chunks
 
 Tools deferred to later phases:
-    - capture_url(url)       : Phase 4 (web capture)
     - list_themes(level=1)   : Phase 5 (summary tree)
     - get_chunk(id)          : Phase 5
 
@@ -23,6 +25,7 @@ from __future__ import annotations
 
 import json
 import sys
+from pathlib import Path
 from typing import Any
 
 import mcp.types as types
@@ -30,9 +33,11 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 
 from .. import __version__
+from ..capture.web import CaptureError, capture_url
 from ..chat.answer import StreamConfig, collect_answer, extract_citation_keys
 from ..chat.retriever import Retriever
 from ..config import load_settings
+from ..index.indexer import index_vault
 from ..venice import VeniceAuthError, VeniceConnectionError
 
 SERVER_NAME = "murano"
@@ -125,6 +130,36 @@ def _build_server() -> Server:
                     "required": ["query"],
                 },
             ),
+            types.Tool(
+                name="capture_url",
+                title="Capture URL into vault",
+                description=(
+                    "Fetches a web page, extracts its main content with "
+                    "trafilatura, and writes a Markdown file with YAML "
+                    "frontmatter into `<vault>/web-captures/`. The file is "
+                    "indexed immediately, so subsequent `ask_kb` and "
+                    "`search_kb` calls can cite it."
+                ),
+                inputSchema={
+                    "type": "object",
+                    "properties": {
+                        "url": {
+                            "type": "string",
+                            "description": "Absolute http(s) URL to capture.",
+                        },
+                        "tags": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "Optional extra tags added to the file's "
+                                "frontmatter alongside `web-capture`."
+                            ),
+                            "default": [],
+                        },
+                    },
+                    "required": ["url"],
+                },
+            ),
         ]
 
     @app.call_tool()
@@ -138,11 +173,15 @@ def _build_server() -> Server:
                 return _tool_search(arguments)
             if name == "ask_kb":
                 return _tool_ask(arguments)
+            if name == "capture_url":
+                return _tool_capture(arguments)
             raise ValueError(f"Unknown tool: {name!r}")
         except VeniceAuthError as e:
             raise RuntimeError(f"Murano is not configured: {e}") from e
         except VeniceConnectionError as e:
             raise RuntimeError(f"Venice connection failed: {e}") from e
+        except CaptureError as e:
+            raise RuntimeError(f"Capture failed: {e}") from e
 
     return app
 
@@ -238,6 +277,66 @@ def _tool_ask(arguments: dict[str, Any]) -> list[types.TextContent]:
 
     body = answer_text.rstrip() + "\n" + "\n".join(sources_lines)
     return [types.TextContent(type="text", text=body)]
+
+
+def _tool_capture(arguments: dict[str, Any]) -> list[types.TextContent]:
+    url = _require_str(arguments, "url")
+    raw_tags = arguments.get("tags") or []
+    if not isinstance(raw_tags, list):
+        raise ValueError("Argument `tags` must be an array of strings if supplied.")
+    extra_tags = [str(t).strip() for t in raw_tags if str(t).strip()]
+
+    settings = load_settings()
+    if not settings.vault_root.exists():
+        raise RuntimeError(
+            f"Vault does not exist at {settings.vault_root}. Run `murano init` first."
+        )
+
+    page = capture_url(settings, url, extra_tags=extra_tags or None)
+
+    text_lines = [
+        "Captured into the vault:",
+        f"  title:    {page.title}",
+        f"  path:     {page.relpath}",
+        f"  words:    {page.word_count}",
+        f"  size:     {page.byte_count} bytes",
+    ]
+    if page.site_name:
+        text_lines.append(f"  site:     {page.site_name}")
+    if page.published_date:
+        text_lines.append(f"  published: {page.published_date}")
+
+    # Auto-index so the page is immediately queryable. Index failures fall
+    # back to a warning — the file itself is already on disk.
+    try:
+        report = index_vault(settings, subpath=Path(page.relpath))
+        text_lines.append(
+            f"  indexed:  {report.chunks_inserted} chunks "
+            f"({report.elapsed_seconds:.2f}s)"
+        )
+    except VeniceAuthError as e:
+        text_lines.append(f"  index:    NOT indexed ({e})")
+    except VeniceConnectionError as e:
+        text_lines.append(f"  index:    NOT indexed ({e})")
+
+    structured = json.dumps(
+        {
+            "url": page.url,
+            "title": page.title,
+            "relpath": page.relpath,
+            "absolute_path": str(page.absolute_path),
+            "word_count": page.word_count,
+            "byte_count": page.byte_count,
+            "site_name": page.site_name,
+            "published_date": page.published_date,
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+    return [
+        types.TextContent(type="text", text="\n".join(text_lines)),
+        types.TextContent(type="text", text=structured),
+    ]
 
 
 def _require_str(arguments: dict[str, Any], key: str) -> str:

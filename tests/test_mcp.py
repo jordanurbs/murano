@@ -19,7 +19,7 @@ import pytest
 
 from murano.config import Settings
 from murano.index import db as dbmod
-from murano.mcp.server import _build_server, _tool_ask, _tool_search
+from murano.mcp.server import _build_server, _tool_ask, _tool_capture, _tool_search
 from murano.venice import ResolvedModel, ResolvedModels
 
 EMBED_DIMS = 8
@@ -153,7 +153,7 @@ def test_build_server_registers_both_tools() -> None:
     assert app.name == "murano"
 
 
-def test_list_tools_returns_search_and_ask() -> None:
+def test_list_tools_returns_all_registered_tools() -> None:
     """Drive the registered list_tools handler through MCP's machinery."""
     import mcp.types as types
 
@@ -164,13 +164,12 @@ def test_list_tools_returns_search_and_ask() -> None:
     result = result_root.root
     assert isinstance(result, types.ListToolsResult)
     names = sorted(t.name for t in result.tools)
-    assert names == ["ask_kb", "search_kb"]
+    assert names == ["ask_kb", "capture_url", "search_kb"]
 
-    for tool in result.tools:
-        assert tool.description and "vault" in tool.description.lower() or "knowledge" in tool.description.lower()
-        assert tool.inputSchema["type"] == "object"
-        assert "query" in tool.inputSchema["properties"]
-        assert "query" in tool.inputSchema["required"]
+    by_name = {t.name: t for t in result.tools}
+    assert "query" in by_name["search_kb"].inputSchema["required"]
+    assert "query" in by_name["ask_kb"].inputSchema["required"]
+    assert "url" in by_name["capture_url"].inputSchema["required"]
 
 
 def test_search_kb_returns_text_and_structured_json(vault_with_chunks: Settings) -> None:
@@ -258,6 +257,63 @@ def test_call_tool_unknown_tool_is_protocol_error(vault_with_chunks: Settings) -
     assert any(
         "Unknown tool" in c.text for c in result.content if isinstance(c, types.TextContent)
     )
+
+
+_SAMPLE_HTML = """
+<html><head><title>Capture Demo Page</title></head><body>
+<article>
+<h1>Capture Demo</h1>
+<p>This is a demonstration page. It has enough words for trafilatura to extract
+the main body content. We mention risotto and arborio rice so search hits work.</p>
+<p>Another paragraph here. More substance ensures the extractor treats this as
+real content. Lorem ipsum dolor sit amet, consectetur adipiscing elit.</p>
+</article>
+</body></html>
+"""
+
+
+def test_capture_url_tool_writes_file_and_indexes_it(vault_with_chunks: Settings) -> None:
+    from unittest.mock import patch as _patch
+
+    # Stub the HTTP fetch + Venice embedding so the test is hermetic.
+    p1, p2, p3 = _patches_for_search()
+    with (
+        p1, p2, p3,
+        _patch("murano.capture.web.fetch_html", return_value=_SAMPLE_HTML),
+        _patch("murano.index.indexer.embed_texts", side_effect=lambda *a, **k: [_vec(1,0,0,0,0,0,0,0)]),
+        _patch("murano.index.indexer.build_client", return_value=object()),
+        _patch("murano.index.indexer.resolve_models", return_value=_resolved()),
+    ):
+        out = _tool_capture({"url": "https://example.com/demo", "tags": ["demo", "test"]})
+
+    # First content block = human text; second = structured JSON.
+    assert len(out) == 2
+    text_payload = out[0].text
+    structured = json.loads(out[1].text)
+
+    assert "Captured into the vault" in text_payload
+    assert "indexed:" in text_payload
+    assert structured["url"] == "https://example.com/demo"
+    assert structured["relpath"].startswith("web-captures/")
+    assert structured["relpath"].endswith(".md")
+    assert structured["word_count"] > 0
+
+    written_path = Path(structured["absolute_path"])
+    assert written_path.exists()
+    content = written_path.read_text(encoding="utf-8")
+    assert content.startswith("---\n")
+    assert "demo" in content
+    assert "test" in content
+
+
+def test_capture_url_tool_rejects_blank_url(vault_with_chunks: Settings) -> None:
+    with pytest.raises(ValueError, match="url"):
+        _tool_capture({"url": "   "})
+
+
+def test_capture_url_tool_rejects_non_list_tags(vault_with_chunks: Settings) -> None:
+    with pytest.raises(ValueError, match="tags"):
+        _tool_capture({"url": "https://example.com/x", "tags": "not-a-list"})
 
 
 def test_call_tool_search_kb_via_dispatcher(vault_with_chunks: Settings) -> None:

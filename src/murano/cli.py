@@ -495,9 +495,72 @@ def ask(
 
 
 @app.command()
-def capture(url: str = typer.Argument(..., help="URL to capture into the vault.")) -> None:  # noqa: ARG001
-    """Capture a web page into the vault. (Phase 4)"""
-    _not_yet("Phase 4", "capture")
+def capture(
+    url: str = typer.Argument(..., help="URL to capture into the vault."),
+    tags: list[str] = typer.Option(  # noqa: B008
+        [],
+        "--tag",
+        help="Extra tag to add to the file's frontmatter. Repeatable.",
+    ),
+    no_index: bool = typer.Option(
+        False,
+        "--no-index",
+        help="Skip auto-indexing the new file; rely on `murano watch` or a manual `murano index`.",
+    ),
+) -> None:
+    """Capture a web page into the vault as a Markdown file with YAML frontmatter."""
+    from .capture.web import CaptureError, capture_url
+
+    settings = load_settings()
+    if not settings.vault_root.exists():
+        err_console.print(
+            f"Vault does not exist at [bold]{settings.vault_root}[/]. "
+            "Run [bold]murano init[/] first."
+        )
+        raise typer.Exit(code=1)
+
+    console.print(f"[dim]Fetching {url} ...[/]")
+    try:
+        page = capture_url(settings, url, extra_tags=tags or None)
+    except CaptureError as e:
+        err_console.print(str(e))
+        raise typer.Exit(code=4) from e
+
+    table = Table(title="Captured", show_header=False, header_style="bold cyan")
+    table.add_column("field", style="dim")
+    table.add_column("value")
+    table.add_row("title", page.title)
+    table.add_row("path", page.relpath)
+    table.add_row("words", str(page.word_count))
+    table.add_row("size", f"{page.byte_count:,} bytes")
+    if page.site_name:
+        table.add_row("site", page.site_name)
+    if page.published_date:
+        table.add_row("published", page.published_date)
+    console.print(table)
+
+    if no_index:
+        console.print(
+            "[dim]Skipped auto-indexing. Run [bold]murano index[/] or [bold]murano watch[/] "
+            "to embed it.[/]"
+        )
+        return
+
+    from .index.indexer import index_vault
+
+    console.print("[dim]Indexing the new file ...[/]")
+    try:
+        report = index_vault(settings, subpath=Path(page.relpath))
+    except VeniceAuthError as e:
+        err_console.print(str(e))
+        raise typer.Exit(code=2) from e
+    except VeniceConnectionError as e:
+        err_console.print(str(e))
+        raise typer.Exit(code=3) from e
+    console.print(
+        f"[green]Indexed[/] {page.relpath} \u2014 "
+        f"{report.chunks_inserted} chunks ({report.elapsed_seconds:.2f}s)."
+    )
 
 
 @app.command()

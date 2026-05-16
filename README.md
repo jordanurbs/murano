@@ -41,7 +41,7 @@ See [`MURANO_PLAN.md`](./MURANO_PLAN.md) for the full plan and phase breakdown.
 - [x] **Phase 2** — Vault → chunks → embeddings (`index`, `reindex`, `watch`, `search`)
 - [x] **Phase 3** — Flat RAG (`ask` with streaming + Obsidian-style citations)
 - [x] **Phase 3.5** — MCP server (`mcp` with `search_kb` + `ask_kb` tools; configs in [`integrations/`](./integrations/))
-- [ ] **Phase 4** — Web capture (`capture`)
+- [x] **Phase 4** — Web capture (`capture <url>` + `capture_url` MCP tool, auto-indexed)
 - [ ] **Phase 5** — Hierarchical summary tree
 - [ ] **Phase 6** — Web UI + REST API (`serve` on port 3000)
 - [ ] **Phase 6.5** — Reference skill files (Hermes, OpenClaw)

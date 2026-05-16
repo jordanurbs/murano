@@ -31,13 +31,11 @@ dependencies = [
     "tiktoken>=0.7.0",
     # Phase 3.5: MCP server
     "mcp>=1.0.0",
+    # Phase 4: web capture
+    "trafilatura>=1.12.0",
 ]
 
 [project.optional-dependencies]
-# Phase 4: web capture
-capture = [
-    "trafilatura>=1.12.0",
-]
 # Phase 5: hierarchical tree + scheduling
 tree = [
     "numpy>=1.26.0",
