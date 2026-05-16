@@ -10,13 +10,14 @@ No backend service. No telemetry. By default the only outbound call is to `api.v
 - `murano capture <url>` fetches the URL you pass. `murano capture-feed <feed-url>` fetches the feed URL and the entry links the feed publisher advertises in it. **All capture URLs are restricted to public-internet hosts** — loopback, RFC-1918, link-local, and cloud-metadata addresses are refused, and redirects to private hosts are blocked. Each response is streamed with a 16 MiB cap. Set `MURANO_ALLOW_PRIVATE_CAPTURES=1` to opt-in for development.
 - `MURANO_VENICE_BASE_URL` lets advanced users point at any OpenAI-compatible endpoint (Ollama, vLLM, LM Studio). When that's set, Murano **never** sends the keychain Venice API key — you must provide `MURANO_API_KEY` for the local endpoint, or leave it unset for no-auth servers. The keychain key is also refused if the canonical Venice host is configured over `http://` (downgrade attack).
 
-## Install (dev)
+## Install
 
-Requires Python 3.11+ and [`uv`](https://github.com/astral-sh/uv).
+Requires **Python 3.11+** and [`uv`](https://github.com/astral-sh/uv).
 
 ```bash
-uv venv
-source .venv/bin/activate
+git clone https://github.com/aicaptains/murano.git
+cd murano
+uv venv && source .venv/bin/activate
 uv pip install -e .
 ```
 
@@ -25,19 +26,14 @@ uv pip install -e .
 ```bash
 murano init                    # create ~/murano/vault/ and ~/.murano/
 murano config set-key          # paste your Venice API key (stored in OS keychain)
-murano ping                    # validate connectivity and resolve models
+murano ping                    # → "Venice OK, chat=qwen-3-6-plus, embed=text-embedding-qwen3-8b"
 
-# Drop some .md files into ~/murano/vault/ and:
+# Drop some .md files into ~/murano/vault/, then:
 murano index                   # embed them
 murano serve --restart         # http://localhost:3000 — chat UI + REST API + nightly tree rebuild
 ```
 
-You should see:
-
-```
-Venice OK, chat=qwen-3-6-plus, embed=text-embedding-qwen3-8b
-  embed: 4096 dims, max 32768 tokens
-```
+**Want the full walkthrough** (per-step expected output, MCP wiring for Claude Desktop / Cursor, LAN-binding setup, an end-to-end verification checklist, and a thorough troubleshooting section)? See [**`INSTALL.md`**](./INSTALL.md). It's the source of truth for first-run.
 
 ## Roadmap
 
