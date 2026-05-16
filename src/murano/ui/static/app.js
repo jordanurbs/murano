@@ -2,6 +2,26 @@
 // Vanilla JS (no framework). ~250 lines.
 
 (() => {
+  // ---------- API token (audit-4 finding 2.5) ----------
+  // If the server was started with --api-token, the page meta tag carries
+  // the token and we attach it to every fetch on /api/.
+  const apiTokenMeta = document.querySelector('meta[name="murano-api-token"]');
+  const API_TOKEN = apiTokenMeta ? apiTokenMeta.getAttribute("content") : "";
+
+  // Monkey-patch fetch so we don't have to remember to add the header at
+  // every call site. Only adds the header to /api/ requests.
+  const _origFetch = window.fetch.bind(window);
+  window.fetch = function muranoFetch(input, init) {
+    init = init || {};
+    let url = typeof input === "string" ? input : (input && input.url) || "";
+    if (API_TOKEN && url.startsWith("/api/")) {
+      const headers = new Headers(init.headers || {});
+      if (!headers.has("X-Murano-Token")) headers.set("X-Murano-Token", API_TOKEN);
+      init.headers = headers;
+    }
+    return _origFetch(input, init);
+  };
+
   // ---------- theme toggle ----------
   const root = document.documentElement;
   const savedTheme = localStorage.getItem("murano.theme");

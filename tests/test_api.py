@@ -418,6 +418,34 @@ def test_open_404_for_missing_file_inside_vault(client: TestClient) -> None:
     assert r.status_code == 404
 
 
+def test_open_rejects_non_markdown_extensions(
+    client: TestClient, vault_env: Settings
+) -> None:
+    """Audit-4 must-fix: /api/v1/open used to launch the OS handler for any
+    file extension, turning the vault into an execution sink. Now restricted
+    to .md / .markdown only."""
+    for name in ("evil.command", "evil.html", "evil.dmg", "evil.app", "evil.sh"):
+        (vault_env.vault_root / name).write_text("payload")
+        r = client.post("/api/v1/open", json={"path": name})
+        assert r.status_code == 400, f"{name}: {r.status_code} {r.text}"
+        assert "Markdown" in r.json()["detail"]
+
+
+def test_open_accepts_markdown_extensions(
+    client: TestClient, vault_env: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sanity: the restriction is on extension, not content. .md and
+    .markdown both pass the gate. We mock subprocess.run to avoid actually
+    launching the editor in CI."""
+    import subprocess
+
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: None)
+    (vault_env.vault_root / "ok.markdown").write_text("# ok")
+    for name in ("cooking/risotto.md", "ok.markdown"):
+        r = client.post("/api/v1/open", json={"path": name})
+        assert r.status_code == 200, f"{name}: {r.status_code} {r.text}"
+
+
 # --------- vault browser ---------
 
 
@@ -489,6 +517,71 @@ def test_pages_render_with_200(client: TestClient) -> None:
         r = client.get(path)
         assert r.status_code == 200, path
         assert "Murano" in r.text
+
+
+def test_api_token_required_for_mutating_endpoints(
+    vault_env: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Audit-4 finding 2.5: --api-token gates POST endpoints behind X-Murano-Token."""
+    monkeypatch.setenv("MURANO_API_TOKEN", "secret-token-value")
+    app = create_app(enable_schedule=False, enable_watch=False)
+    with TestClient(app) as c:
+        # Read endpoints stay open even with a token set.
+        assert c.get("/api/v1/health").status_code == 200
+        assert c.get("/api/v1/themes").status_code == 200
+
+        # Mutating endpoints require the token.
+        r = c.post("/api/v1/index")
+        assert r.status_code == 401, r.text
+        assert "X-Murano-Token" in r.json()["detail"]
+
+        # Wrong token: still 401.
+        r = c.post("/api/v1/index", headers={"X-Murano-Token": "wrong"})
+        assert r.status_code == 401
+
+        # Correct token: bypasses the gate. (The index call itself may then
+        # fail downstream; the gate is what we're testing here.)
+        with patch("murano.api.routes.index_vault") as idx:
+            idx.return_value = type("R", (), {
+                "files_seen": 0, "files_indexed": 0, "files_unchanged": 0,
+                "files_removed": 0, "chunks_inserted": 0, "elapsed_seconds": 0.0,
+                "errors": [],
+            })()
+            r = c.post(
+                "/api/v1/index", headers={"X-Murano-Token": "secret-token-value"}
+            )
+        assert r.status_code == 200, r.text
+
+
+def test_api_token_disabled_by_default(client: TestClient) -> None:
+    """No MURANO_API_TOKEN -> no auth required on mutating endpoints
+    (current single-user local UX preserved)."""
+    with patch("murano.api.routes.index_vault") as idx:
+        idx.return_value = type("R", (), {
+            "files_seen": 0, "files_indexed": 0, "files_unchanged": 0,
+            "files_removed": 0, "chunks_inserted": 0, "elapsed_seconds": 0.0,
+            "errors": [],
+        })()
+        r = client.post("/api/v1/index")
+    assert r.status_code == 200
+
+
+def test_ui_page_carries_api_token_meta_when_set(
+    vault_env: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bundled UI needs the token too — it's injected as a meta tag."""
+    monkeypatch.setenv("MURANO_API_TOKEN", "ui-token")
+    app = create_app(enable_schedule=False, enable_watch=False)
+    with TestClient(app) as c:
+        r = c.get("/")
+        assert r.status_code == 200
+        assert 'name="murano-api-token"' in r.text
+        assert 'content="ui-token"' in r.text
+
+
+def test_ui_page_omits_token_meta_when_unset(client: TestClient) -> None:
+    r = client.get("/")
+    assert 'name="murano-api-token"' not in r.text
 
 
 def test_settings_page_reflects_env_key_source(

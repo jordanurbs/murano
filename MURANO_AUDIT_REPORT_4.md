@@ -1,0 +1,97 @@
+# Murano audit — Claude Opus 4.7 — 2026-05-16
+
+## 0. Bottom line
+
+Murano is close to ship-worthy but **not v1-ready until the SSRF in the capture path is closed**. The previous three rounds caught the obvious classes of bug — path traversal, key exfil, feed dedup, MCP coercion, citation streaming, backup symlink leak, byte offsets — and those fixes all hold. The two material issues I found that prior auditors missed are both in the same neighbourhood: (1) `capture_url` accepts arbitrary `http(s)` URLs with no host validation, and `capture-feed` lets the *feed publisher* (not the user) supply those URLs; (2) `/api/v1/open` runs `open(1)` on any file extension inside the vault, not just Markdown. The first is a real exploit reproducible in-process; the second turns the vault into an execution sink the moment a user binds to `0.0.0.0` or a malicious browser tab can reach loopback. Beyond those, there's a small correctness bug where a Markdown heading containing `]]` breaks the citation contract, a plaintext-HTTP key-leak hole around `MURANO_VENICE_BASE_URL`, and a test that passes for the wrong reason. Baseline is green: `153 passed`, `ruff check` clean, `murano licenses` clean.
+
+## 1. Must-fix bugs
+
+1. **SSRF in `capture_url` (and therefore in `/api/v1/capture`, MCP `capture_url`, and `capture-feed`).** `src/murano/capture/web.py:257-261` validates a URL by checking the scheme is `http(s)` and that `urlparse(url).netloc` is non-empty. Nothing else. `fetch_html` at `src/murano/capture/web.py:156-206` then does `httpx.stream("GET", url, follow_redirects=True, …)`. I reproduced this in-process by standing up a local HTTP server on `127.0.0.1` returning an HTML body, calling `capture_url(settings, "http://127.0.0.1:<port>/internal")`, and confirming that the response contents landed in `vault/web-captures/2026-05-16-internal-only-content.md`. The same path accepts `http://169.254.169.254/…` (cloud metadata), `http://10.0.0.1/…`, `http://192.168.1.1/…`, `http://[::1]/…`, `http://internal.corp.local/…`. Two distinct exposures stack on top of this:
+
+   - `/api/v1/capture` at `src/murano/api/routes.py:144-167` is unauthenticated. The `--host 0.0.0.0` warning at `src/murano/cli.py:697-705` flags read access but not the side-effect of "anyone on your LAN can ask Murano to fetch internal HTTP services and write them into your vault". On loopback, a CSRF from any open browser tab can also fire it (JSON content-type does trigger a preflight, but only for cross-origin requests — same-origin or `null`-origin embeds in dev tooling are wide open).
+   - `capture-feed` at `src/murano/capture/feed.py:88-99,154,174` extracts the per-entry `link` from feed XML and passes it to `capture_url` unchecked. The user typed the feed URL; the *publisher* chose the entry links. A malicious or compromised RSS feed pointing entries at `http://127.0.0.1:3000/api/v1/index` or `http://192.168.1.1/router/admin?reboot=1` makes Murano the SSRF gadget. Round 3 mentioned this as a documentation-accuracy issue and updated `README.md:9-11`; the security severity was missed.
+
+   Suggested fix: in `capture_url`, after `urlparse`, resolve the hostname via `socket.getaddrinfo()` and refuse any answer in private, loopback, link-local, or multicast ranges (`ipaddress.ip_address(host).is_private | is_loopback | is_link_local | is_multicast | is_reserved`). Apply the same check to `_entry_link` in `capture/feed.py` so a feed can't smuggle past it. Add `tests/test_security.py` cases that assert `capture_url(..., "http://127.0.0.1/...")` and `capture_feed(...)` over a feed with internal entry links both raise `CaptureError`.
+
+2. **`/api/v1/open` opens any file extension via the OS launcher.** `src/murano/api/routes.py:207-235` resolves the path with `safe_vault_path`, checks it exists, and runs `subprocess.run(["open", str(candidate)], check=True)` on macOS (`xdg-open` on Linux, `os.startfile` on Windows). The docstring at `src/murano/api/routes.py:209` says "open in the OS default editor", but `open(1)` launches whatever app handles the file's UTI: `.command` files execute as shell scripts, `.html` opens the browser (running any embedded JS), `.app` directories launch the app, `.dmg` mounts the image. I confirmed by planting `evil.command` and `evil.html` in a test vault, then POSTing `/api/v1/open` with each — both returned `200` and `subprocess.run` was called for the resolved path. The vault is a content-only directory in the user's threat model; nobody expects "drop a file" to compound with "open anything via HTTP" into "anyone with HTTP access to Murano can execute arbitrary user-installed handlers". Combined with the SSRF above, a captured `.html` from a malicious feed entry plus an `/api/v1/open` request opens a browser tab pointed at attacker-controlled content. Suggested fix: restrict to `.md`/`.markdown` (the only extensions the rest of Murano cares about) — `if candidate.suffix.lower() not in (".md", ".markdown"): raise HTTPException(400, "Only Markdown files can be opened.")`. Add a regression test that planting a `.html` and a `.command` both return 400. Optionally pass `--` to `open` defensively (`["open", "--", str(candidate)]`).
+
+## 2. Should-fix design concerns
+
+1. **Citations break when a Markdown heading contains `]]`.** Chunker keeps the raw heading text in `heading_path` (`src/murano/vault/chunker.py:131-135`), `derive_citation_key` puts the leaf segment in the citation (`src/murano/chat/retriever.py:90-95`), and the user prompt embeds `CITE: [[{citation_key}]]` (`src/murano/chat/answer.py:102`). For a file whose heading is `## Click [[here]] for more`, the citation rendered to the model is `[[notes#Click [[here]] for more]]`. The lazy regex `\[\[([^\[\]]+?)\]\]` at `src/murano/chat/answer.py:115` matches the *inner* `[[here]]` and `extract_citation_keys` returns `["here"]`. I reproduced this against the real chunker → derive_citation_key → extract_citation_keys pipeline. Same impact in the SSE `done` event (`src/murano/api/routes.py:296`) and the CLI Sources footer (`src/murano/cli.py:499-509`): the actual chunk is shown as "uncited", and a phantom `[[here]]` source is reported as cited. Suggested fix: have the chunker replace `[` and `]` (or just strip them) from `heading_path` segments before persisting, since they have no semantic value as Obsidian heading anchors anyway. Add a regression test in `tests/test_chunker.py` that headings with brackets produce bracket-free `heading_path`.
+
+2. **`MURANO_API_KEY` flows over plaintext HTTP without warning.** `src/murano/venice.py:75-84` returns `MURANO_API_KEY` for any non-canonical base URL. If a user sets `MURANO_VENICE_BASE_URL=http://internal.lan/v1` + `MURANO_API_KEY=team-token`, the token goes in `Authorization: Bearer team-token` over cleartext. The existing warning at `src/murano/venice.py:77-81` only fires when the env var is *empty*. Round 3 closed the canonical-Venice keychain leak but didn't tighten this side. Suggested fix: log a one-time warning when `settings.venice_base_url.startswith("http://")` AND `MURANO_API_KEY` is set, even if (especially if) the host is non-canonical.
+
+3. **`_is_canonical_venice("http://api.venice.ai/...")` returns True.** `src/murano/venice.py:48-54` only checks the hostname. A user who copy-pastes a downgraded URL — `MURANO_VENICE_BASE_URL=http://api.venice.ai/api/v1` — would have `resolve_api_key` return the *keychain Venice key* and `_http_get_models` ship it to a plaintext target. The real `api.venice.ai` probably 301-redirects to `https`, but the initial `Authorization: Bearer <KEY>` header is already on the wire before the redirect. Trivial fix in `_is_canonical_venice`: also require `urlparse(base_url).scheme == "https"` for the canonical-host fast path.
+
+4. **`test_capture_url_rejects_non_http_urls` passes for the wrong reason.** `tests/test_capture.py:126-129` only covers scheme rejection (`file://`, `ftp://`, `javascript:`, empty, garbage). It does not assert anything about `http://127.0.0.1/`, `http://169.254.169.254/`, `http://10.0.0.1/`. Same for `tests/test_api.py:363-380` (`test_capture_endpoint_rejects_bad_url`). Both test suites look comprehensive but cover only the easy half of "Invalid URL". Suggested fix: once issue 1.1 is closed, copy those test bodies and add a private-IP iteration that asserts `CaptureError` (unit-level) and `400` (HTTP-level).
+
+5. **Unauthenticated admin endpoints have no toggle other than the `--host` warning.** `/api/v1/index`, `/api/v1/tree/rebuild`, `/api/v1/capture`, `/api/v1/open` all mutate state or burn Venice tokens, and all are reachable to anyone who can reach the bind address. The single-user local model is right for `127.0.0.1`, but the operator who follows the LAN warning and *still* binds to `0.0.0.0` ("trusted network") has no granularity. Suggested fix: introduce `--api-token` (default: nothing, no auth, no behaviour change) and gate the write-side endpoints behind a `X-Murano-Token` header when it's set. The CLI prints the token at startup so the operator can paste it into their tooling. No-token preserves the current frictionless single-user UX on loopback.
+
+6. **`/api/v1/health` reveals absolute filesystem paths to any caller.** `src/murano/api/routes.py:88-105` returns `vault_root`, `data_root`, `venice_base_url`, model IDs. On loopback this is fine; combined with `--host 0.0.0.0` the LAN warning at `cli.py:697-705` only mentions read access in general terms, not "anyone can fingerprint your username / drive layout / which Venice you talk to". Suggested fix: tag `vault_root` / `data_root` as `Optional` in the response and only include them when the request comes from a loopback peer (check `request.client.host`).
+
+7. **The `--host 0.0.0.0` warning is printed once before `uvicorn.run` blocks.** `src/murano/cli.py:697-705` is sound but easy to scroll past in the terminal. If a `--restart` precedes it, the kill output and the warning interleave. A user that re-launches via `dev.sh` after editing config sees one line of warning and a wall of uvicorn logs. Suggested fix: when binding non-loopback, also include the warning text in the FastAPI `description` so it shows up at `/docs` and in `/api/v1/health` (LAN operators staring at the API are at least confronted with it once more).
+
+## 3. Nice-to-have polish
+
+1. **`_unique_path` is a TOCTOU between check and write.** `src/murano/capture/web.py:139-153` checks `candidate.exists()` and returns; the caller then does `target_path.write_text(...)`. Two concurrent captures of the same slug on the same day race. Real-world impact is low (people don't typically fire two captures of the same URL in parallel) but the CLI + MCP + HTTP + watcher background-indexer all coexist in one server, and the watcher could trigger reindex midway between `_unique_path` and `write_text`. Use `Path.touch(exist_ok=False)` or `os.open(..., O_CREAT | O_EXCL)` to atomically reserve the path.
+
+2. **`subprocess.run(["open", str(candidate)])` does not pass `--`.** Already noted under 1.2 but worth re-emphasizing: even after restricting to `.md`, prefer `["open", "--", str(candidate)]` so an exotic future code path that lets a leading `-` slip through can't be misread as a flag.
+
+3. **`_logger.warning` for the non-Venice + empty key case prints the full base URL** (`src/murano/venice.py:77-81`). For local servers like `http://localhost:11434/v1` that's fine; for `http://internal.team.intranet/v1` it's information disclosure into logs that might be shipped elsewhere. Probably fine for v1.
+
+4. **`server.py`'s OpenAPI `description` is honest but stale once 1.1 lands** (`src/murano/api/server.py:65-69`): "Two narrowly-scoped exceptions exist by design: (1) `/api/v1/capture` and the RSS feed walker fetch user-supplied URLs". After the SSRF fix the "(1)" half becomes "(1) `/api/v1/capture` fetches user-supplied URLs, restricted to public-internet hosts, with the RSS feed walker inheriting the same restriction".
+
+5. **`README.md:10` claim "the feed URL **and every entry link the feed publisher advertises in it**" buries the SSRF risk in prose.** Once 1.1 ships, the README copy can shorten back to "fetches the feed URL and the public-internet entry links it advertises" because the network boundary is then enforced in code, not just documented.
+
+## 4. Things you got right
+
+- The retriever core is genuinely shared. `src/murano/chat/answer.py:139-228` (`stream_answer`) is consumed identically by the CLI (`cli.py:443`), HTTP (`api/routes.py:257`), and MCP (`mcp/server.py:317` via `collect_answer`). No transport-local drift.
+- The round-2 capture-then-index policy lives in exactly one place (`capture/web.py:306-345`) and all three transports call it: `cli.py:558`, `api/routes.py:152`, `mcp/server.py:347`.
+- The path-traversal class is closed and locked. `src/murano/security.py:29-56` uses `Path.relative_to` instead of `str.startswith`, the read/open/file routes all go through it (`api/routes.py:215,449,473`, `ui/routes.py:100`), and the regression tests cover the sibling-prefix case explicitly (`tests/test_security.py:48,test_api.py:393`).
+- Keychain key gating is solid: `src/murano/venice.py:65-84` plus `tests/test_security.py:172-184` mean the keychain key never even gets *read* on a custom base URL, let alone sent.
+- SSE error path is now generic (`api/routes.py:309-317`). Internal exception strings stop at the server log.
+- The citation streaming carry buffer in `src/murano/ui/static/app.js:164-198` is well thought through: lazy regex, tail buffer keyed off the last `[[`, explicit flush in `done`.
+- Feed retry starvation fix (`capture/feed.py:121-126,150-152,165-169`) is clean — `attempts` counts new tries, linkless/seen entries don't burn the limit, and failures stay un-flagged so they retry next run.
+- Backup symlink leak fix (`backup.py:60-84`) resolves each candidate and uses `relative_to` rather than the unsafe `Path.is_file()` (which follows symlinks). Defensive integrity check at `backup.py:157-161` runs the namelist after writing.
+- Byte offsets are now real UTF-8 bytes (`vault/chunker.py:108-138`), and the diff is justified in a comment that names the audit-3 reproducer.
+- SQL is parameterized everywhere I looked (`tree/retrieve.py:88-94`, `index/db.py:174-200`, `index/db.py:262-284`); the MCP `get_chunk(id)` cannot be SQL-injected with a crafted id.
+- The `--host` non-loopback warning is the right shape (`cli.py:697-705`) — loud, accurate, calls out the specific endpoints affected.
+- `kill_port` no longer falls back to `pkill -f 'murano serve'` (`api/scheduler.py:219-223`); the prior aggressive pkill is explicitly documented as the wrong fix.
+
+## 5. Plan-vs-reality gap
+
+1. ✓ `murano init && murano config set-key && murano index && murano serve` flow. Implemented at `cli.py:73-107,109-135,270-304,639-724`; the round-3 isolated live smoke covered the actual run, my fresh review didn't burn the Venice tokens to re-verify.
+2. ⚠️ "File changes in the vault reflect in answers within seconds." The watcher event mapping is exercised by `tests/test_watcher.py:20`; the live timing was not re-measured this round.
+3. ✓ `murano capture <url>` works (`cli.py:517-572`, `capture/web.py:199-303`, `tests/test_capture.py:155`). RSS adds the `capture-feed` path with the SSRF concern from 1.1.
+4. ⚠️ "Hierarchical summary tree rebuilds nightly." Cron registered at `api/scheduler.py:129-140`, started in lifespan (`api/server.py:44-57`); the scheduled firing was not observed in real time.
+5. ⚠️ "`murano mcp` works in Claude Desktop and Cursor." Configs and tool definitions check out (`integrations/claude-desktop/mcp-config.json`, `integrations/cursor/mcp-config.json`, `mcp/server.py:58-209`, `tests/test_mcp.py`); I did not launch the inspector or a host this round.
+6. ✓ Reference skill files present (`integrations/hermes/murano-skill.md`, `integrations/openclaw/murano-skill.yaml`).
+7. ✗ **"No outbound network calls except to api.venice.ai."** The README (`README.md:9-11`) names two designed exceptions: user-supplied capture URLs and `MURANO_VENICE_BASE_URL`. With 1.1 unfixed, those exceptions include *every* host the network can reach, not just the public internet. Documented as "narrowly-scoped" but enforced as wide-open.
+8. ✓ "Venice API key never leaves keychain → api.venice.ai." Held under fresh review (`venice.py:65-84`, `tests/test_security.py:172-184`). Sub-concerns in 2.2 and 2.3 are about a *different* token (`MURANO_API_KEY`) on a *different* base URL, not the keychain key on canonical Venice.
+9. ✓ No GPL/AGPL deps. `uv run murano licenses` printed `All clear — 88 packages, none flagged as copyleft.`
+
+## 6. What I didn't get to
+
+- I did not run `npx @modelcontextprotocol/inspector murano mcp`. MCP coverage is from unit tests + a deliberate read of `mcp/server.py`. The `_coerce_int` / `_coerce_float` raise-instead-of-clamp fixes from round 2 are intact (`mcp/server.py:486-517`).
+- I did not run the 50-concurrent-SSE-client load test. The per-request synchronous Venice stream at `api/routes.py:247-335` will not multiplex; each ask holds one socket. Practical ceiling depends on the operator's network and Venice rate limits, but no behavior degrades beyond "the OS will start refusing connections at some N".
+- I did not empirically find the chunk count where `murano tree rebuild` exceeds 10 minutes. `tree/build.py:69-93` loads every chunk + embedding into memory; at 4096-dim float32 that's ~16 KiB per chunk before Python object overhead — a 100k-chunk vault is ~1.6 GiB, well below a 16 GiB machine's pressure point but worth a real benchmark before claiming v1 scales arbitrarily.
+- I did not do a full backup → restore → ask round-trip. The unzip-and-grep half of "no secrets in the zip" was effectively done by round 3 + the integrity assert at `backup.py:157-161`.
+- I did not test DNS rebinding empirically. The theoretical CSRF + SSRF + open-file chain in 1.1 + 1.2 is reasoned about, not demonstrated end-to-end through a browser.
+
+## 7. Regressions from prior audits
+
+Empty. Every prior round-1/2/3 finding I checked is still closed at `HEAD`:
+- Sibling-prefix path traversal on `/api/v1/{open,vault/file}` + `/file` → `security.py:29` + tests at `test_security.py:48` and `test_api.py:393,467`.
+- Indexer absolute-path fallback → `indexer.py:89-97` raises now; tested at `test_security.py:97`.
+- Keychain Venice key to arbitrary hosts → `venice.py:65-84`; tested at `test_security.py:172`.
+- Feed dedup set-iteration nondeterminism → ordered list + parallel set at `capture/feed.py:140-143,193-204`.
+- MCP arg coercion silent fallback → raise instead at `mcp/server.py:486-517`.
+- htmx CDN dep → vendored at `src/murano/ui/static/htmx.min.js`.
+- Backup symlink leak (round 3) → resolved-and-rel_to at `backup.py:60-84`; integrity assertion at `backup.py:157-161`.
+- RSS retry starvation (round 3) → `capture/feed.py:121-126,150-152,165-169`.
+- Vault-tree symlink crash (round 3) → `_resolve_inside` at `api/routes.py:440-447`.
+- Citation streaming split (round 3) → carry buffer at `ui/static/app.js:164-198`.
+- Byte offsets (round 3) → UTF-8-byte counting at `vault/chunker.py:108-138`.
+- Fetch byte cap (round 3) → streaming + 16 MiB cap at `capture/web.py:156-206`; tests at `test_capture.py:234,269`.
+
+The closed-findings inventory in `AUDITING.md` is missing a row for round 3 (commit `1e1c9c4`, GPT-5.5). Recommend adding it the next time the audit doc is touched — auditing-the-audit-doc is a Round-5 problem.

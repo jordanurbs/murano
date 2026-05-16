@@ -83,11 +83,31 @@ def _strip_frontmatter(text: str) -> tuple[str, str | None, int]:
     return text[m.end():], title, m.end()
 
 
+def _sanitize_heading_segment(segment: str) -> str:
+    """Strip characters that would break our Obsidian-style citation contract.
+
+    Audit-4 finding: a Markdown heading like `## Click [[here]] for more`
+    flowed into `heading_path` unchanged. derive_citation_key then produced
+    `notes#Click [[here]] for more`; rendering that as `[[...]]` gave
+    `[[notes#Click [[here]] for more]]`, and the lazy `[[...]]` regex in
+    extract_citation_keys matched the inner `[[here]]` instead of the whole
+    thing — the real chunk showed as uncited and a phantom `here` source was
+    reported. Brackets have no semantic value as heading anchors anyway, so
+    we just drop them at chunk time.
+    """
+    return segment.replace("[", "").replace("]", "").strip()
+
+
 def _build_heading_path(stack: list[tuple[int, str]], frontmatter_title: str | None) -> str:
     parts: list[str] = []
     if frontmatter_title:
-        parts.append(frontmatter_title)
-    parts.extend(title for _, title in stack)
+        clean = _sanitize_heading_segment(frontmatter_title)
+        if clean:
+            parts.append(clean)
+    for _, title in stack:
+        clean = _sanitize_heading_segment(title)
+        if clean:
+            parts.append(clean)
     return HEADING_SEPARATOR.join(parts)
 
 

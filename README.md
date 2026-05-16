@@ -7,8 +7,8 @@
 Murano is a clean-room rebuild of the "memory tree" concept. You drop Markdown files into a vault (Obsidian-compatible), Murano chunks, embeds, and indexes them, then lets you chat with your knowledge through a CLI, a local web UI on port 3000, or an MCP server that any agent framework (Claude Desktop, Cursor, Hermes, OpenClaw, Codex CLI) can plug into.
 
 No backend service. No telemetry. By default the only outbound call is to `api.venice.ai`. Two narrowly-scoped exceptions exist by design:
-- `murano capture <url>` fetches the URL you pass. `murano capture-feed <feed-url>` fetches the feed URL **and every entry link the feed publisher advertises in it** — both http(s) only, both fed through the same `trafilatura`-backed extractor with a 16 MiB byte cap per response.
-- `MURANO_VENICE_BASE_URL` lets advanced users point at any OpenAI-compatible endpoint (Ollama, vLLM, LM Studio). When that's set, Murano **never** sends the keychain Venice API key — you must provide `MURANO_API_KEY` for the local endpoint, or leave it unset for no-auth servers.
+- `murano capture <url>` fetches the URL you pass. `murano capture-feed <feed-url>` fetches the feed URL and the entry links the feed publisher advertises in it. **All capture URLs are restricted to public-internet hosts** — loopback, RFC-1918, link-local, and cloud-metadata addresses are refused, and redirects to private hosts are blocked. Each response is streamed with a 16 MiB cap. Set `MURANO_ALLOW_PRIVATE_CAPTURES=1` to opt-in for development.
+- `MURANO_VENICE_BASE_URL` lets advanced users point at any OpenAI-compatible endpoint (Ollama, vLLM, LM Studio). When that's set, Murano **never** sends the keychain Venice API key — you must provide `MURANO_API_KEY` for the local endpoint, or leave it unset for no-auth servers. The keychain key is also refused if the canonical Venice host is configured over `http://` (downgrade attack).
 
 ## Install (dev)
 

@@ -90,8 +90,11 @@ class CapturedResponse(BaseModel):
 class HealthResponse(BaseModel):
     status: str
     version: str
-    vault_root: str
-    data_root: str
+    # vault_root / data_root are absolute filesystem paths and would let any
+    # remote caller fingerprint your username + drive layout. Audit-4 made
+    # these loopback-only: on non-loopback requests they're returned as None.
+    vault_root: str | None = None
+    data_root: str | None = None
     chunks_db_exists: bool
     summary_tree_exists: bool
     chunk_count: int
@@ -104,3 +107,6 @@ class HealthResponse(BaseModel):
     chat_model: str
     embed_model: str
     venice_base_url: str
+    # Set when the request comes from a non-loopback peer. Lets the operator
+    # see the LAN-exposure warning right next to the live config.
+    lan_exposure_warning: str | None = None

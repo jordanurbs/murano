@@ -668,14 +668,30 @@ def serve(
         "--reload",
         help="Hot-reload on source changes (dev only).",
     ),
+    api_token: str | None = typer.Option(
+        None,
+        "--api-token",
+        help=(
+            "If set, gates every POST/PUT/PATCH/DELETE under /api/ behind a "
+            "matching X-Murano-Token header. The bundled UI is given the "
+            "token automatically. Required for safe LAN binding."
+        ),
+    ),
 ) -> None:
     """Run the local web UI + REST API on http://localhost:3000."""
+    import os as _os
+
     import uvicorn
 
     from .api.scheduler import kill_port
 
     settings = load_settings()
     bind_port = port if port is not None else settings.web_port
+
+    # If --api-token is provided, propagate it into the env so the reload
+    # subprocess (and the UI route's lazy lookup) sees it.
+    if api_token:
+        _os.environ["MURANO_API_TOKEN"] = api_token
 
     if restart:
         killed = kill_port(bind_port)
@@ -689,20 +705,33 @@ def serve(
     )
 
     # Loud warning when the operator binds to anything other than localhost.
-    # All Murano endpoints are unauthenticated by design (single-user local);
-    # exposing them to the LAN makes /open, /capture, /vault/file, /ask
-    # reachable to anyone on the network. This is dangerous and easy to do
-    # by accident (e.g. copy-pasting `--host 0.0.0.0` from a Docker example).
+    # Mutating endpoints (/open, /capture, /index, /tree/rebuild) can be
+    # gated behind --api-token now (audit-4 fix); read endpoints stay open.
     _loopback_hosts = {"127.0.0.1", "::1", "localhost"}
+    bind_warning_for_app: str | None = None
     if host not in _loopback_hosts:
-        err_console.print(
-            "[bold red]WARNING:[/] Murano is binding to a non-loopback address "
-            f"([bold]{host}[/]). All endpoints are unauthenticated. Anyone "
-            "able to reach this address can read your vault, capture URLs "
-            "from your network, open files in your editor, and run LLM calls "
-            "on your Venice key. If this is not what you intend, stop the "
-            "server and re-run without [bold]--host[/]."
-        )
+        active_token = api_token or _os.environ.get("MURANO_API_TOKEN", "")
+        if active_token:
+            err_console.print(
+                "[bold yellow]NOTE:[/] Murano is binding to a non-loopback "
+                f"address ([bold]{host}[/]). Mutating endpoints require the "
+                "[bold]X-Murano-Token[/] header (token is set). Read "
+                "endpoints (/health, /search, /chunks, /themes) are open."
+            )
+        else:
+            bind_warning_for_app = (
+                "Bound to non-loopback address without --api-token. All "
+                "endpoints are unauthenticated."
+            )
+            err_console.print(
+                "[bold red]WARNING:[/] Murano is binding to a non-loopback address "
+                f"([bold]{host}[/]). All endpoints are unauthenticated. Anyone "
+                "able to reach this address can read your vault, capture URLs "
+                "from your network (public-internet hosts only), open Markdown "
+                "files in your editor, and run LLM calls on your Venice key. "
+                "Re-run with [bold]--api-token <secret>[/] to gate the mutating "
+                "endpoints, or stop the server and drop the [bold]--host[/] flag."
+            )
 
     if reload:
         # Reload needs the import-string form; background workers off so the
@@ -720,7 +749,12 @@ def serve(
     else:
         from .api.server import create_app
 
-        application = create_app(enable_schedule=schedule, enable_watch=watch)
+        application = create_app(
+            enable_schedule=schedule,
+            enable_watch=watch,
+            api_token=api_token,
+            bind_warning=bind_warning_for_app,
+        )
         uvicorn.run(application, host=host, port=bind_port, log_level="info")
 
 

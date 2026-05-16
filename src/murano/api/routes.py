@@ -71,8 +71,19 @@ def _effective_api_key_source(settings: Settings) -> str:
     return "env" if _os.environ.get(LOCAL_API_KEY_ENV) else "none"
 
 
+_LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost", "testclient"}
+
+
+def _is_loopback_request(request: Request) -> bool:
+    """True if the request originated from this machine (or the in-process TestClient)."""
+    client = request.client
+    if client is None:
+        return True
+    return client.host in _LOOPBACK_HOSTS
+
+
 @router.get("/health", response_model=schemas.HealthResponse)
-def health(settings: Settings = Depends(get_settings)):
+def health(request: Request, settings: Settings = Depends(get_settings)):
     chunk_n = 0
     file_n = 0
     if settings.chunks_db.exists():
@@ -84,12 +95,24 @@ def health(settings: Settings = Depends(get_settings)):
             c.close()
 
     tree_status = tree_retrieve.status(settings)
+    loopback = _is_loopback_request(request)
+    lan_warning = None
+    if not loopback:
+        lan_warning = (
+            "This server is bound to a non-loopback address. ALL endpoints are "
+            "unauthenticated unless --api-token was passed at startup. Anyone "
+            "able to reach this address can read your vault, capture URLs from "
+            "your network (public-internet hosts only), open Markdown files in "
+            "your editor, and run LLM calls on your Venice key."
+        )
 
     return schemas.HealthResponse(
         status="ok",
         version=__version__,
-        vault_root=str(settings.vault_root),
-        data_root=str(settings.data_root),
+        # Filesystem paths only on loopback — they leak the operator's
+        # username + drive layout otherwise.
+        vault_root=str(settings.vault_root) if loopback else None,
+        data_root=str(settings.data_root) if loopback else None,
         chunks_db_exists=settings.chunks_db.exists(),
         summary_tree_exists=tree_status.exists,
         chunk_count=chunk_n,
@@ -102,6 +125,7 @@ def health(settings: Settings = Depends(get_settings)):
         chat_model=settings.chat_model,
         embed_model=settings.embed_model,
         venice_base_url=settings.venice_base_url,
+        lan_exposure_warning=lan_warning,
     )
 
 
@@ -204,30 +228,48 @@ def list_themes(level: int = 1, settings: Settings = Depends(get_settings)):
     )
 
 
+OPENABLE_SUFFIXES = (".md", ".markdown")
+
+
 @router.post("/open")
 def open_file(body: schemas.OpenRequest, settings: Settings = Depends(get_settings)):
-    """Open a vault file in the OS default editor. Vault-relative paths only.
+    """Open a vault Markdown file in the OS default editor.
 
-    This intentionally rejects absolute paths and any path that resolves
-    outside the vault root — we don't want to be a generic file opener.
+    Vault-relative paths only. Restricted to `.md` / `.markdown` extensions —
+    Audit-4 found that `open(1)` / `xdg-open` / `os.startfile` will happily
+    launch the registered handler for any file type, turning a captured
+    `.command` (shell script), `.html` (browser tab with JS), `.dmg`, or
+    `.app` into an execution sink reachable over the unauthenticated HTTP
+    surface. Murano only cares about Markdown anywhere else, so we only
+    expose Markdown here.
     """
     try:
         candidate = safe_vault_path(settings.vault_root, body.path)
     except VaultPathError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
+    if candidate.suffix.lower() not in OPENABLE_SUFFIXES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Only Markdown files can be opened via this endpoint; "
+                f"got suffix {candidate.suffix!r}."
+            ),
+        )
     if not candidate.exists() or not candidate.is_file():
         raise HTTPException(status_code=404, detail=f"File not found: {body.path}")
 
+    # `--` before the path defends against any future code path that lets a
+    # leading `-` slip through and be misread as a flag by `open` / `xdg-open`.
     system = platform.system()
     try:
         if system == "Darwin":
-            subprocess.run(["open", str(candidate)], check=True)
+            subprocess.run(["open", "--", str(candidate)], check=True)
         elif system == "Windows":
             import os
 
             os.startfile(str(candidate))  # type: ignore[attr-defined]
         else:
-            subprocess.run(["xdg-open", str(candidate)], check=True)
+            subprocess.run(["xdg-open", "--", str(candidate)], check=True)
     except (subprocess.CalledProcessError, FileNotFoundError, OSError) as e:
         raise HTTPException(
             status_code=500, detail=f"Failed to open {body.path}: {e}"

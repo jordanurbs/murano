@@ -37,6 +37,7 @@ import httpx
 import trafilatura
 
 from ..config import Settings
+from ..security import UnsafeURLError, assert_public_http_url
 
 USER_AGENT = "murano/0.1 (+https://github.com/aicaptains/murano)"
 DEFAULT_TIMEOUT = 20.0
@@ -137,20 +138,35 @@ def _format_frontmatter(
 
 
 def _unique_path(target_dir: Path, base_slug: str, date_prefix: str, ext: str = ".md") -> Path:
-    """Append `-2`, `-3`, ... to the slug if the target file already exists."""
+    """Reserve a unique target path atomically.
+
+    Audit-4 polish: previously this was a check-then-write race — two
+    concurrent captures of the same slug on the same day could both pass
+    the `not exists()` check and the second would overwrite the first.
+    Now we use `O_CREAT | O_EXCL` to atomically create-and-claim the file;
+    a `FileExistsError` means the slug was taken between iterations and we
+    move on.
+    """
+    import os as _os
+
+    def _try_claim(p: Path) -> bool:
+        try:
+            fd = _os.open(p, _os.O_CREAT | _os.O_EXCL | _os.O_WRONLY, 0o644)
+            _os.close(fd)
+            return True
+        except FileExistsError:
+            return False
+
     candidate = target_dir / f"{date_prefix}-{base_slug}{ext}"
-    if not candidate.exists():
+    if _try_claim(candidate):
         return candidate
-    n = 2
-    while True:
+    for n in range(2, 1000):
         candidate = target_dir / f"{date_prefix}-{base_slug}-{n}{ext}"
-        if not candidate.exists():
+        if _try_claim(candidate):
             return candidate
-        n += 1
-        if n > 999:
-            raise CaptureError(
-                f"Refusing to create more than 999 capture variants for slug {base_slug!r}"
-            )
+    raise CaptureError(
+        f"Refusing to create more than 999 capture variants for slug {base_slug!r}"
+    )
 
 
 def fetch_html(
@@ -158,6 +174,8 @@ def fetch_html(
     *,
     timeout: float = DEFAULT_TIMEOUT,
     max_bytes: int = MAX_FETCH_BYTES,
+    enforce_public_host: bool = True,
+    max_redirects: int = 5,
 ) -> str:
     """Download a URL via httpx with a sensible UA, follow redirects, byte cap.
 
@@ -165,38 +183,84 @@ def fetch_html(
     `max_bytes`. Previously `httpx.get(...).text` read the entire body into
     memory unbounded; a malicious or accidentally-large response could OOM
     `murano capture` before trafilatura had a chance to evaluate it.
+
+    Audit-4 fix: when `enforce_public_host` is True (the production default),
+    refuse non-public hostnames (loopback, RFC-1918, link-local, etc.) and
+    re-validate each redirect target — so an attacker can't 302 our way into
+    the internal network. The MURANO_ALLOW_PRIVATE_CAPTURES=1 env override
+    lets dev workflows capture localhost when needed.
+
+    `max_redirects` is the hop limit (httpx's default is 20; we shrink it).
     """
+    if enforce_public_host:
+        try:
+            assert_public_http_url(url)
+        except UnsafeURLError as e:
+            raise CaptureError(str(e)) from e
+
     try:
-        with httpx.stream(
-            "GET",
-            url,
-            headers={"User-Agent": USER_AGENT, "Accept": "text/html,*/*;q=0.8"},
-            follow_redirects=True,
-            timeout=timeout,
-        ) as resp:
-            resp.raise_for_status()
+        # We do NOT use httpx's built-in follow_redirects=True. Following
+        # redirects manually lets us re-validate the host of every hop, which
+        # is the only cure for DNS-rebinding-via-redirect.
+        with httpx.Client(timeout=timeout, follow_redirects=False) as client:
+            current_url = url
+            for _ in range(max_redirects + 1):
+                with client.stream(
+                    "GET",
+                    current_url,
+                    headers={
+                        "User-Agent": USER_AGENT,
+                        "Accept": "text/html,*/*;q=0.8",
+                    },
+                ) as resp:
+                    if resp.status_code in (301, 302, 303, 307, 308):
+                        location = resp.headers.get("location")
+                        if not location:
+                            raise CaptureError(
+                                f"Redirect from {current_url} had no Location header."
+                            )
+                        next_url = str(httpx.URL(current_url).join(location))
+                        if enforce_public_host:
+                            try:
+                                assert_public_http_url(next_url)
+                            except UnsafeURLError as e:
+                                raise CaptureError(
+                                    f"Redirect target rejected: {e}"
+                                ) from e
+                        current_url = next_url
+                        continue  # close `with`, fetch next hop
 
-            # Honor an honest server-side Content-Length when present.
-            content_length = resp.headers.get("content-length")
-            if content_length and content_length.isdigit() and int(content_length) > max_bytes:
+                    # Terminal response. Body must be read inside the `with`.
+                    resp.raise_for_status()
+                    content_length = resp.headers.get("content-length")
+                    if (
+                        content_length
+                        and content_length.isdigit()
+                        and int(content_length) > max_bytes
+                    ):
+                        raise CaptureError(
+                            f"Refusing to fetch {url}: server declared "
+                            f"Content-Length {int(content_length):,} > cap "
+                            f"{max_bytes:,} bytes."
+                        )
+                    chunks: list[bytes] = []
+                    received = 0
+                    for chunk in resp.iter_bytes():
+                        received += len(chunk)
+                        if received > max_bytes:
+                            raise CaptureError(
+                                f"Refusing to fetch {url}: response exceeded "
+                                f"{max_bytes:,} bytes (truncated streaming read)."
+                            )
+                        chunks.append(chunk)
+                    body = b"".join(chunks)
+                    encoding = resp.encoding or "utf-8"
+                    break  # success — exit the redirect loop
+            else:
+                # for/else: ran out of redirect budget without breaking.
                 raise CaptureError(
-                    f"Refusing to fetch {url}: server declared "
-                    f"Content-Length {int(content_length):,} > cap "
-                    f"{max_bytes:,} bytes. Override via `fetch_html(max_bytes=...)`."
+                    f"Too many redirects (> {max_redirects}) starting at {url}."
                 )
-
-            chunks: list[bytes] = []
-            received = 0
-            for chunk in resp.iter_bytes():
-                received += len(chunk)
-                if received > max_bytes:
-                    raise CaptureError(
-                        f"Refusing to fetch {url}: response exceeded "
-                        f"{max_bytes:,} bytes (truncated streaming read)."
-                    )
-                chunks.append(chunk)
-            body = b"".join(chunks)
-            encoding = resp.encoding or "utf-8"
     except httpx.HTTPError as e:
         raise CaptureError(f"Failed to fetch {url}: {e}") from e
 

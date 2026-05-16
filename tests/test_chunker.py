@@ -116,6 +116,40 @@ def test_count_tokens_and_file_hash_basics() -> None:
     assert file_hash("abc") != file_hash("abd")
 
 
+def test_headings_with_brackets_dont_corrupt_citation_keys() -> None:
+    """Audit-4 should-fix: a Markdown heading like `## Click [[here]] for more`
+    flowed into heading_path unchanged. derive_citation_key produced
+    `notes#Click [[here]] for more`; rendering as `[[...]]` gave
+    `[[notes#Click [[here]] for more]]`, and the lazy regex matched the
+    inner `[[here]]` instead of the whole thing — chunks showed uncited
+    and phantom citations were reported as cited.
+
+    Fix: strip brackets from heading_path segments at chunk time.
+    """
+    from murano.chat.answer import extract_citation_keys
+    from murano.chat.retriever import derive_citation_key
+
+    md = (
+        "# Click [[here]] for more\n\n"
+        "A paragraph of substantive text so the chunker keeps the section.\n"
+    )
+    chunks = chunk_markdown(md)
+    assert chunks
+    heading_path = chunks[0].heading_path
+    # Brackets must not survive into heading_path.
+    assert "[" not in heading_path
+    assert "]" not in heading_path
+
+    key = derive_citation_key("notes.md", heading_path)
+    rendered = f"[[{key}]]"
+    parsed = extract_citation_keys(rendered)
+    # Round-trip: exactly one key, and it's the real one.
+    assert len(parsed) == 1
+    assert parsed[0] == key, (
+        f"citation extraction round-trip failed; got {parsed}, expected [{key!r}]"
+    )
+
+
 def test_byte_offsets_are_true_utf8_bytes_not_characters() -> None:
     """Audit-3 should-fix: the chunker advanced `cursor` by `len(line)`
     (character count). For non-ASCII content above a heading, that desynced

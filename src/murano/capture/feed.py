@@ -20,6 +20,7 @@ from typing import Any
 import feedparser
 
 from ..config import Settings
+from ..security import UnsafeURLError, assert_public_http_url
 from .web import CapturedPage, CaptureError, capture_url
 
 DEFAULT_LIMIT = 20
@@ -112,6 +113,16 @@ def capture_feed(
     if capture_fn is None:
         capture_fn = capture_url
 
+    # Audit-4: validate the FEED URL before fetching, then re-validate every
+    # entry link the publisher advertises. The user typed the feed URL; the
+    # publisher chose the entry links. Without this, a malicious or
+    # compromised feed could point at http://127.0.0.1:3000/api/v1/index,
+    # http://192.168.1.1/router/admin, http://169.254.169.254/, etc.
+    try:
+        assert_public_http_url(feed_url)
+    except UnsafeURLError as e:
+        raise FeedError(str(e)) from e
+
     parsed = parser(feed_url)
     if getattr(parsed, "bozo", False) and not getattr(parsed, "entries", []):
         # bozo with no entries means a hard parse failure; bozo with entries is fine.
@@ -161,6 +172,19 @@ def capture_feed(
             # Linkless entries don't count against `limit` — they're malformed,
             # and counting them would let a feed publisher starve us by
             # putting `limit` linkless entries at the top.
+            continue
+        # Re-validate each entry link's host before passing to capture_url.
+        # capture_url itself also validates, but doing it here too gives a
+        # clearer per-entry error in the report instead of a generic
+        # CaptureError after capture_url's pre-flight.
+        try:
+            assert_public_http_url(link)
+        except UnsafeURLError as e:
+            report.errors.append(
+                FeedEntryResult(url=link, title=title, status="error", error=str(e))
+            )
+            # SSRF-blocked links don't burn the limit budget either; they're
+            # malicious / misconfigured feed content, not real attempts.
             continue
         if eid in seen_set:
             report.seen.append(FeedEntryResult(url=link, title=title, status="seen"))

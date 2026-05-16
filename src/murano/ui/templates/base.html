@@ -5,6 +5,14 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}Murano{% endblock %}</title>
   <link rel="stylesheet" href="/static/style.css">
+  {% if api_token %}
+  <!-- If --api-token / MURANO_API_TOKEN was set at startup, the UI's JS
+       reads this meta tag and includes the value as X-Murano-Token on every
+       fetch to /api/. Same-Origin Policy protects this against cross-origin
+       readers; a malicious page in your browser can't pull the token out of
+       Murano's HTML. -->
+  <meta name="murano-api-token" content="{{ api_token }}">
+  {% endif %}
   <!-- htmx is vendored under /static/htmx.min.js so the local UI never
        fetches third-party scripts. Original: htmx.org @ 2.0.4 (BSD-2). -->
   <script src="/static/htmx.min.js" defer></script>

@@ -46,12 +46,21 @@ class VeniceConnectionError(RuntimeError):
 
 
 def _is_canonical_venice(base_url: str) -> bool:
-    """Whether base_url points at the real api.venice.ai host (case-insensitive)."""
+    """Whether base_url points at the real api.venice.ai over HTTPS.
+
+    Audit-4: also require https. Previously a downgraded URL like
+    `http://api.venice.ai/api/v1` matched as "canonical" and the keychain
+    key would be put in an `Authorization: Bearer <KEY>` header on a
+    plaintext request — leaking the key on the wire before any TLS
+    redirect could fire.
+    """
     try:
-        host = urlparse(base_url).hostname or ""
+        parsed = urlparse(base_url)
     except (ValueError, AttributeError):
         return False
-    return host.lower() == CANONICAL_VENICE_HOST
+    host = (parsed.hostname or "").lower()
+    scheme = (parsed.scheme or "").lower()
+    return host == CANONICAL_VENICE_HOST and scheme == "https"
 
 
 def resolve_api_key(settings: Settings) -> str:
@@ -78,6 +87,16 @@ def resolve_api_key(settings: Settings) -> str:
             "Using non-Venice base URL %s with no %s set; sending empty Bearer.",
             settings.venice_base_url,
             LOCAL_API_KEY_ENV,
+        )
+    elif settings.venice_base_url.lower().startswith("http://"):
+        # Audit-4 finding 2.2: warn loudly when a configured token is about to
+        # ride over plaintext. Operators sometimes copy-paste a base URL with
+        # `http://` from a tutorial; the token then leaks to anyone on path.
+        _logger.warning(
+            "%s is set and being sent to %s over PLAINTEXT HTTP. "
+            "Use https:// (or accept that the token is exposed on the wire).",
+            LOCAL_API_KEY_ENV,
+            settings.venice_base_url,
         )
     # OpenAI SDK requires a non-empty string; spaces work fine as a placeholder
     # for local servers that accept any token (Ollama, llama.cpp).

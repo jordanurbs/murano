@@ -231,65 +231,74 @@ def test_capture_url_raises_when_extraction_empty(vault: Settings) -> None:
         capture_url(vault, "https://example.com/empty", fetcher=fake_fetch)
 
 
-def test_fetch_html_streams_and_caps_huge_responses(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Audit-3 polish: prior `httpx.get(...).text` buffered the entire body
-    unbounded, so a malicious huge response could OOM `murano capture`.
-    Now fetch_html streams and refuses to buffer more than `max_bytes`."""
+class _FakeStreamResp:
+    """Reusable httpx.Client.stream() context-manager double."""
+
+    def __init__(self, *, status_code=200, headers=None, chunks=None):
+        self.status_code = status_code
+        self.headers = headers or {}
+        self.encoding = "utf-8"
+        self._chunks = chunks or []
+
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+    def raise_for_status(self): pass
+    def iter_bytes(self):
+        yield from self._chunks
+
+
+def _patch_client_stream(monkeypatch: pytest.MonkeyPatch, resp_factory) -> None:
+    """Replace httpx.Client(...).stream(...) with a factory returning a fake response.
+
+    fetch_html now drives redirects manually via `httpx.Client`, so the prior
+    `httpx.stream` mock no longer applies. resp_factory(method, url, **kw) ->
+    _FakeStreamResp.
+    """
     import httpx
 
+    class _FakeClient:
+        def __init__(self, **kw): pass
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+        def stream(self, method, url, **kw):
+            return resp_factory(method, url, **kw)
+
+    monkeypatch.setattr(httpx, "Client", _FakeClient)
+
+
+def test_fetch_html_streams_and_caps_huge_responses(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Audit-3 polish: prior `httpx.get(...).text` buffered the entire body
+    unbounded, so a malicious huge response could OOM `murano capture`."""
     from murano.capture.web import CaptureError, fetch_html
 
-    # Simulate a server that *claims* a content-length within budget but
-    # then drips 1 KiB chunks until we trip the cap.
     chunk = b"x" * 1024
-    n_chunks = 50  # 50 KiB total
+    _patch_client_stream(
+        monkeypatch,
+        lambda *a, **k: _FakeStreamResp(chunks=[chunk] * 50),
+    )
 
-    class _FakeResp:
-        status_code = 200
-        headers: dict = {}
-        encoding = "utf-8"
-
-        def raise_for_status(self): pass
-        def iter_bytes(self):
-            for _ in range(n_chunks):
-                yield chunk
-
-    class _FakeStream:
-        def __init__(self, *a, **k): pass
-        def __enter__(self): return _FakeResp()
-        def __exit__(self, *a): return False
-
-    monkeypatch.setattr(httpx, "stream", lambda *a, **k: _FakeStream())
-
-    # max_bytes way below total -> CaptureError on the streaming path.
     with pytest.raises(CaptureError, match="exceeded"):
-        fetch_html("https://example.com/", max_bytes=8192)
+        fetch_html("https://example.com/", max_bytes=8192, enforce_public_host=False)
 
 
 def test_fetch_html_rejects_oversized_content_length(monkeypatch: pytest.MonkeyPatch) -> None:
     """A server-declared Content-Length larger than the cap is rejected
     BEFORE we start buffering anything."""
-    import httpx
-
     from murano.capture.web import CaptureError, fetch_html
 
-    class _FakeResp:
-        status_code = 200
-        headers = {"content-length": str(100 * 1024 * 1024)}  # 100 MiB
-        encoding = "utf-8"
+    def factory(*a, **k):
+        return _FakeStreamResp(
+            headers={"content-length": str(100 * 1024 * 1024)},
+            chunks=[],  # would AssertionError if we got here, but we shouldn't
+        )
 
-        def raise_for_status(self): pass
-        def iter_bytes(self):  # should never be called
-            raise AssertionError("must not start streaming when content-length is over cap")
-
-    class _FakeStream:
-        def __init__(self, *a, **k): pass
-        def __enter__(self): return _FakeResp()
-        def __exit__(self, *a): return False
-
-    monkeypatch.setattr(httpx, "stream", lambda *a, **k: _FakeStream())
+    _patch_client_stream(monkeypatch, factory)
     with pytest.raises(CaptureError, match="Content-Length"):
-        fetch_html("https://example.com/", max_bytes=16 * 1024 * 1024)
+        fetch_html(
+            "https://example.com/",
+            max_bytes=16 * 1024 * 1024,
+            enforce_public_host=False,
+        )
 
 
 def test_capture_and_index_returns_index_skip_reason_on_venice_failure(

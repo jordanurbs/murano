@@ -29,13 +29,15 @@ reviewer doesn't re-trip on closed ground.
 
 ## What's already been audited (don't re-litigate)
 
-Two prior third-party audits have been closed. Skim these before starting
+Four prior third-party audits have been closed. Skim these before starting
 so your time goes to fresh territory:
 
 | Round | Report | Fix commit | Highlights |
 |---|---|---|---|
 | 1 | `MURANO_AUDIT_REPORT.md` | `ce7425b` | Sibling-prefix path traversal on `/api/v1/{open,vault/file}` + `/file`; indexer silently storing absolute paths for out-of-vault files; keychain Venice key leaking to arbitrary hosts via `MURANO_VENICE_BASE_URL`. |
-| 2 | (committed as part of `3933d2a`) | `3933d2a` | Feed dedup non-determinism (set ordering); MCP arg coercion silently clamped bad types; aggressive `pkill -f`; unpkg.com supply-chain dep in the UI; misleading "only outbound api.venice.ai" claims in several docstrings; missing api_key_source reporting; duplicated capture-then-index policy across CLI/HTTP/MCP. |
+| 2 | (in commit body) | `3933d2a` | Feed dedup non-determinism (set ordering); MCP arg coercion silently clamped bad types; aggressive `pkill -f`; unpkg.com supply-chain dep in the UI; misleading "only outbound api.venice.ai" claims in several docstrings; missing api_key_source reporting; duplicated capture-then-index policy across CLI/HTTP/MCP. |
+| 3 | `MURANO_AUDIT_REPORT_3.md` | `1e1c9c4` | Backup zip dereferenced symlinks and leaked out-of-vault content; RSS broken-entry starvation; `/api/v1/vault/tree` 500 on symlinked dir pointing outside vault; settings UI ignored env key source; JS citation parser lost `[[…]]` tokens split across SSE deltas; chunker `byte_offset` was a *character* offset; no fetch byte cap; SSE error path leaked exception types/paths. |
+| 4 | `MURANO_AUDIT_REPORT_4.md` | (this audit's fix commit) | **SSRF** in `capture_url` / `/api/v1/capture` / `capture-feed` allowed reaching loopback, RFC-1918, link-local, cloud-metadata; `/api/v1/open` ran the OS handler for any file extension (`.command`, `.html`, `.dmg`, …); `_is_canonical_venice` accepted `http://` (key downgrade); `MURANO_API_KEY` rode over plaintext HTTP without warning; Markdown headings containing `]]` broke citation extraction; `/api/v1/health` leaked absolute filesystem paths to non-loopback peers; optional `--api-token` added for safe LAN binding. |
 
 If you're confident you've found one of those bugs *still present* in the
 current `HEAD`, that's actually a great finding — call it out as a

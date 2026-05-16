@@ -542,23 +542,28 @@ def test_capture_feed_skipped_seen_entries_dont_eat_limit_budget(
 
 
 def test_capture_feed_legacy_set_state_is_coerced_to_list(
-    settings: Settings, tmp_path: Path
+    settings: Settings, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Defensive: pre-fix state files stored seen_ids as a list-derived-from-set.
     A future run must still treat it as ordered without crashing."""
+    # The feed walker now SSRF-validates both the feed URL and each entry
+    # link. Tests use synthetic hostnames; opt-in to the dev-only override
+    # so the validation doesn't reject them.
+    monkeypatch.setenv("MURANO_ALLOW_PRIVATE_CAPTURES", "1")
+
     # Pre-seed state file with a list-typed (post-fix) shape.
     state_path = settings.logs_dir / feed_mod.STATE_FILENAME
     state_path.parent.mkdir(parents=True, exist_ok=True)
     state_path.write_text(
-        '{"https://x/feed": {"seen_ids": ["a", "b"], "feed_title": "X"}}',
+        '{"https://x.example.com/feed": {"seen_ids": ["a", "b"], "feed_title": "X"}}',
         encoding="utf-8",
     )
     parsed = _FakeParsed(
-        entries=[_FakeEntry("https://example.com/c", "C", "c")], feed_title="X"
+        entries=[_FakeEntry("https://c.example.com/", "C", "c")], feed_title="X"
     )
     report = feed_mod.capture_feed(
         settings,
-        "https://x/feed",
+        "https://x.example.com/feed",
         parser=lambda _url: parsed,
         capture_fn=lambda *a, **k: CapturedPage(
             url="x", title="x", relpath="r.md",
@@ -568,5 +573,5 @@ def test_capture_feed_legacy_set_state_is_coerced_to_list(
     )
     assert len(report.captured) == 1
     state = feed_mod._load_state(settings)
-    assert "c" in state["https://x/feed"]["seen_ids"]
-    assert state["https://x/feed"]["seen_ids"][-1] == "c"
+    assert "c" in state["https://x.example.com/feed"]["seen_ids"]
+    assert state["https://x.example.com/feed"]["seen_ids"][-1] == "c"

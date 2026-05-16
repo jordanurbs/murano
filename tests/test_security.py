@@ -148,13 +148,34 @@ def test_iter_vault_files_rejects_subpath_pointing_outside(tmp_path: Path) -> No
 
 
 def test_is_canonical_venice_matches_only_official_host() -> None:
+    """Audit-4: must require HTTPS for the canonical match. A downgraded URL
+    like `http://api.venice.ai/...` is *not* canonical because the keychain
+    key would otherwise be sent in cleartext."""
     assert _is_canonical_venice("https://api.venice.ai/api/v1") is True
     assert _is_canonical_venice("https://api.venice.ai") is True
     assert _is_canonical_venice("https://API.VENICE.AI/api/v1") is True
-    assert _is_canonical_venice("http://api.venice.ai/api/v1") is True  # scheme not checked
+    # Plaintext downgrade is no longer canonical — audit-4 fix.
+    assert _is_canonical_venice("http://api.venice.ai/api/v1") is False
     assert _is_canonical_venice("https://api.venice.ai.evil.com/api/v1") is False
     assert _is_canonical_venice("https://evil.com/api.venice.ai/v1") is False
     assert _is_canonical_venice("http://localhost:11434/v1") is False
+
+
+def test_downgraded_canonical_url_does_not_leak_keychain_key() -> None:
+    """Concrete regression for the audit-4 scheme-downgrade attack:
+    `MURANO_VENICE_BASE_URL=http://api.venice.ai/api/v1` must NOT cause
+    resolve_api_key() to return the keychain Venice key."""
+    from unittest.mock import patch
+
+    from murano.config import Settings
+    from murano.venice import resolve_api_key
+
+    s = Settings(venice_base_url="http://api.venice.ai/api/v1")
+    with patch("murano.venice.get_api_key", return_value="sk-VENICE-SECRET") as gk:
+        # No MURANO_API_KEY set -> placeholder ("no-auth"), NOT the keychain key.
+        key = resolve_api_key(s)
+    assert key != "sk-VENICE-SECRET"
+    gk.assert_not_called()
 
 
 def test_resolve_api_key_uses_keychain_for_canonical_venice() -> None:
@@ -196,3 +217,135 @@ def test_resolve_api_key_uses_env_for_custom_host(
 
 def test_canonical_host_constant_is_correct() -> None:
     assert CANONICAL_VENICE_HOST == "api.venice.ai"
+
+
+# --- SSRF guard (assert_public_http_url) -----------------------------------
+
+
+def test_assert_public_http_url_rejects_loopback_literals() -> None:
+    from murano.security import UnsafeURLError, assert_public_http_url
+
+    for u in (
+        "http://127.0.0.1/",
+        "http://127.1.2.3/",
+        "http://[::1]/",
+        "http://0.0.0.0/",
+    ):
+        with pytest.raises(UnsafeURLError):
+            assert_public_http_url(u)
+
+
+def test_assert_public_http_url_rejects_private_ranges() -> None:
+    from murano.security import UnsafeURLError, assert_public_http_url
+
+    for u in (
+        "http://10.0.0.1/",
+        "http://192.168.1.1/admin",
+        "http://172.16.0.1/",
+        "http://169.254.169.254/latest/meta-data/",  # cloud metadata
+        "http://[fc00::1]/",  # IPv6 ULA
+        "http://[fe80::1]/",  # IPv6 link-local
+        "http://[ff00::1]/",  # IPv6 multicast
+    ):
+        with pytest.raises(UnsafeURLError):
+            assert_public_http_url(u)
+
+
+def test_assert_public_http_url_rejects_localhost_aliases() -> None:
+    from murano.security import UnsafeURLError, assert_public_http_url
+
+    for u in (
+        "http://localhost/",
+        "http://localhost.localdomain/",
+        "http://LOCALHOST:8080/admin",
+    ):
+        with pytest.raises(UnsafeURLError):
+            assert_public_http_url(u)
+
+
+def test_assert_public_http_url_rejects_ipv4_mapped_ipv6_loopback() -> None:
+    """`::ffff:127.0.0.1` is IPv6 syntactically but encodes IPv4 loopback."""
+    from murano.security import UnsafeURLError, assert_public_http_url
+
+    with pytest.raises(UnsafeURLError):
+        assert_public_http_url("http://[::ffff:127.0.0.1]/")
+
+
+def test_assert_public_http_url_rejects_dns_to_private_address() -> None:
+    """Hostname resolves to a private IP via DNS — must block.
+
+    This is the DNS-rebinding-by-name vector: the attacker controls a
+    real public domain that resolves to 10.x or 192.168.x.
+    """
+    from murano.security import UnsafeURLError, assert_public_http_url
+
+    def fake_getaddrinfo(host, port):
+        return [(2, 1, 6, "", ("10.0.0.42", 0))]
+
+    with pytest.raises(UnsafeURLError, match="non-public"):
+        assert_public_http_url("http://evil.example/", resolver=fake_getaddrinfo)
+
+
+def test_assert_public_http_url_accepts_public_address() -> None:
+    """Don't block real public addresses."""
+    from murano.security import assert_public_http_url
+
+    # 93.184.216.34 is example.com (a real, publicly routed IP).
+    def fake_getaddrinfo(host, port):
+        return [(2, 1, 6, "", ("93.184.216.34", 0))]
+
+    # Should not raise.
+    assert_public_http_url("http://example.com/", resolver=fake_getaddrinfo)
+
+
+def test_assert_public_http_url_rejects_non_http_schemes() -> None:
+    from murano.security import UnsafeURLError, assert_public_http_url
+
+    for u in ("file:///etc/passwd", "ftp://example.com/", "javascript:alert(1)"):
+        with pytest.raises(UnsafeURLError):
+            assert_public_http_url(u)
+
+
+def test_assert_public_http_url_dev_override_unlocks_localhost(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The MURANO_ALLOW_PRIVATE_CAPTURES env var unlocks the gate for dev use."""
+    from murano.security import assert_public_http_url
+
+    monkeypatch.setenv("MURANO_ALLOW_PRIVATE_CAPTURES", "1")
+    # Doesn't raise even though host is loopback.
+    assert_public_http_url("http://127.0.0.1:8080/")
+
+
+def test_assert_public_http_url_dev_override_ignored_when_allow_override_false(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Production callers can disable the env override so an attacker-controlled
+    env var doesn't unlock the gate for them."""
+    from murano.security import UnsafeURLError, assert_public_http_url
+
+    monkeypatch.setenv("MURANO_ALLOW_PRIVATE_CAPTURES", "1")
+    with pytest.raises(UnsafeURLError):
+        assert_public_http_url("http://127.0.0.1/", allow_override=False)
+
+
+def test_capture_url_blocks_private_targets(tmp_path) -> None:
+    """End-to-end: capture_url refuses SSRF targets via the live extractor path."""
+    import tempfile
+
+    from murano.capture.web import CaptureError, capture_url
+    from murano.config import Settings
+
+    with tempfile.TemporaryDirectory() as td:
+        td_p = pytest.importorskip("pathlib").Path(td).resolve()
+        s = Settings(vault_root=td_p / "vault", data_root=td_p / "data")
+        (td_p / "vault").mkdir()
+        (td_p / "data").mkdir()
+        for u in (
+            "http://127.0.0.1:8000/leak",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://10.0.0.1/router",
+            "http://localhost:3000/",
+        ):
+            with pytest.raises(CaptureError):
+                capture_url(s, u)

@@ -7,6 +7,7 @@ client to consume the SSE stream from `/api/v1/ask`.
 
 from __future__ import annotations
 
+import os
 from importlib import resources
 
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -20,6 +21,20 @@ from ..tree import retrieve as tree_retrieve
 
 router = APIRouter()
 
+# Kept in sync with `murano.api.server.API_TOKEN_ENV`. We duplicate the
+# constant rather than introduce a ui->api import cycle.
+_API_TOKEN_ENV = "MURANO_API_TOKEN"
+
+
+def _api_token_for_ui() -> str:
+    """Return the API token to inject into the page meta tag.
+
+    Reads MURANO_API_TOKEN at request time so a server restart with a new
+    token is picked up without re-importing the app. Empty string -> no
+    token configured -> the UI sends no X-Murano-Token header.
+    """
+    return (os.environ.get(_API_TOKEN_ENV, "") or "").strip()
+
 
 def _templates_dir() -> str:
     return str(resources.files("murano.ui").joinpath("templates"))
@@ -32,28 +47,23 @@ def get_settings() -> Settings:
     return load_settings()
 
 
+def _base_context(settings: Settings, page: str) -> dict:
+    """Shared template context: settings, current page tag, API token meta."""
+    return {
+        "settings": settings,
+        "page": page,
+        "api_token": _api_token_for_ui(),
+    }
+
+
 @router.get("/", response_class=HTMLResponse)
 def page_chat(request: Request, settings: Settings = Depends(get_settings)):
-    return templates.TemplateResponse(
-        request,
-        "chat.html",
-        {
-            "settings": settings,
-            "page": "chat",
-        },
-    )
+    return templates.TemplateResponse(request, "chat.html", _base_context(settings, "chat"))
 
 
 @router.get("/browse", response_class=HTMLResponse)
 def page_browse(request: Request, settings: Settings = Depends(get_settings)):
-    return templates.TemplateResponse(
-        request,
-        "browse.html",
-        {
-            "settings": settings,
-            "page": "browse",
-        },
-    )
+    return templates.TemplateResponse(request, "browse.html", _base_context(settings, "browse"))
 
 
 @router.get("/settings", response_class=HTMLResponse)
@@ -72,12 +82,9 @@ def page_settings(request: Request, settings: Settings = Depends(get_settings)):
         finally:
             c.close()
     tree_status = tree_retrieve.status(settings)
-    return templates.TemplateResponse(
-        request,
-        "settings.html",
+    ctx = _base_context(settings, "settings")
+    ctx.update(
         {
-            "settings": settings,
-            "page": "settings",
             # Legacy: True iff the keychain has a Venice key. Kept for any
             # third-party UI that templates against this value.
             "api_key_present": bool(get_api_key()),
@@ -89,8 +96,9 @@ def page_settings(request: Request, settings: Settings = Depends(get_settings)):
             "chunk_count": chunk_n,
             "file_count": file_n,
             "tree_status": tree_status,
-        },
+        }
     )
+    return templates.TemplateResponse(request, "settings.html", ctx)
 
 
 @router.get("/file", response_class=HTMLResponse)
