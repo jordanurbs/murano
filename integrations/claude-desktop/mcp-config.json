@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "murano": {
+      "command": "/ABSOLUTE/PATH/TO/.venv/bin/murano",
+      "args": ["mcp"],
+      "env": {
+        "MURANO_VAULT": "/ABSOLUTE/PATH/TO/your/vault",
+        "MURANO_DATA": "/ABSOLUTE/PATH/TO/.murano"
+      }
+    }
+  }
+}

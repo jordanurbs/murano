@@ -514,8 +514,24 @@ def serve(
 
 @app.command()
 def mcp() -> None:
-    """Run the MCP server over stdio for agent frameworks. (Phase 3.5)"""
-    _not_yet("Phase 3.5", "mcp")
+    """Run the MCP server over stdio for agent frameworks.
+
+    Exposes `search_kb` and `ask_kb` as MCP tools. Wire into Claude Desktop,
+    Cursor, Hermes, OpenClaw, etc. via the configs in `integrations/`.
+
+    Logs go to stderr; stdout is reserved for the MCP protocol.
+    """
+    from .mcp.server import main as run_mcp_server
+
+    if not load_settings().chunks_db.exists():
+        err_console.print(
+            "[yellow]warn[/] no index found yet. Tool calls will return errors "
+            "until you run [bold]murano index[/]."
+        )
+    try:
+        run_mcp_server()
+    except KeyboardInterrupt:
+        err_console.print("\n[yellow]MCP server stopped.[/]")
 
 
 if __name__ == "__main__":
