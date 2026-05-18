@@ -43,6 +43,12 @@ dependencies = [
     "apscheduler>=3.10.0",
     # Phase 7: RSS feed capture
     "feedparser>=6.0.10",
+    # Defensive: Python 3.14 on Homebrew (and some Windows/container
+    # installs) ships without a usable system tzdata, which makes
+    # `zoneinfo.ZoneInfo(...)` fail for any zone — including the one
+    # apscheduler picks via tzlocal.get_localzone(). Pinning the pure-
+    # Python `tzdata` package guarantees ZoneInfo works everywhere.
+    "tzdata>=2024.1",
 ]
 
 [project.optional-dependencies]

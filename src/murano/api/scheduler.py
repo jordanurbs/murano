@@ -127,7 +127,13 @@ def start_background_workers(
 
     scheduler: BackgroundScheduler | None = None
     if enable_schedule:
-        scheduler = BackgroundScheduler(timezone="local")
+        # Don't pass `timezone="local"` — apscheduler tries to resolve that
+        # via ZoneInfo("local"), which is never a valid zoneinfo key and
+        # raises ZoneInfoNotFoundError on Python 3.14+ (and intermittently
+        # on earlier versions if the `tzdata` package isn't installed).
+        # Default behavior (no arg) is what we want anyway: apscheduler
+        # calls tzlocal.get_localzone() and gets a real tzinfo object.
+        scheduler = BackgroundScheduler()
         scheduler.add_job(
             _rebuild_job,
             CronTrigger(hour=nightly_hour, minute=nightly_minute),
