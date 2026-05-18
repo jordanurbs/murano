@@ -33,3 +33,18 @@ htmlcov/
 
 .env
 .env.local
+
+# Users who run `murano` from inside the source checkout sometimes create a
+# `vault/` here by reflex (it's a natural place to put notes when you're
+# already cd'd into the project). Murano reads from ~/murano/vault/ by
+# default, NOT from the source dir, so any vault/ at the repo root is
+# user data that must never end up in the public repo.
+/vault/
+
+# `murano init` creates these as the default user-data location. If a user
+# happens to clone the repo into ~/ (so it becomes ~/murano), don't track
+# their personal notes or derived index.
+/.murano/
+
+# Stray local config / smoke-test output occasionally lands here.
+config.toml
