@@ -244,7 +244,7 @@ def _not_yet(phase: str, what: str) -> None:
     raise typer.Exit(code=64)
 
 
-def _print_index_report(report) -> None:  # noqa: ANN001
+def _print_index_report(report, settings=None) -> None:  # noqa: ANN001
     summary = Table(title="Index summary", show_header=False, header_style="bold cyan")
     summary.add_column("metric", style="dim")
     summary.add_column("value")
@@ -265,6 +265,22 @@ def _print_index_report(report) -> None:  # noqa: ANN001
         for e in report.errors:
             err_table.add_row(e.relpath, e.error or "")
         err_console.print(err_table)
+
+    # UX: when no files are found, the most common cause is that the user's
+    # actual notes live somewhere other than the configured vault root (e.g.
+    # they ran `mkdir vault` inside the source checkout instead of using the
+    # default ~/murano/vault/). Surface the path + the override knob so the
+    # next command they run isn't a confused `murano index` again.
+    if report.files_seen == 0 and settings is not None:
+        console.print()
+        console.print(
+            f"[yellow]No Markdown files found in[/] [bold]{settings.vault_root}[/]\n"
+            "  Drop [bold].md[/] / [bold].markdown[/] files there, OR point Murano "
+            "at an existing folder:\n"
+            "    [dim]export MURANO_VAULT=/path/to/your/notes[/]\n"
+            "    [dim]murano index[/]\n"
+            "  (Hidden directories and files starting with [bold].[/] are skipped by design.)"
+        )
 
 
 @app.command()
@@ -301,7 +317,7 @@ def index(
         err_console.print(str(e))
         raise typer.Exit(code=3) from e
 
-    _print_index_report(report)
+    _print_index_report(report, settings)
 
 
 @app.command()
@@ -326,7 +342,7 @@ def reindex() -> None:
         err_console.print(str(e))
         raise typer.Exit(code=3) from e
 
-    _print_index_report(report)
+    _print_index_report(report, settings)
 
 
 @app.command()

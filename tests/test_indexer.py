@@ -173,3 +173,42 @@ def test_no_api_call_when_vault_empty(vault: Settings) -> None:
     assert report.files_seen == 0
     assert report.chunks_inserted == 0
     assert report.embedding_calls == 0
+
+
+def test_cli_index_hint_when_no_files_seen(
+    tmp_path, monkeypatch
+) -> None:
+    """The most common new-user mistake: notes live somewhere other than the
+    configured vault root. `murano index` reports 0 files seen — that's
+    correct, but the user has no idea WHERE Murano is looking. The hint
+    surfaces the configured path + the env override.
+    """
+    from typer.testing import CliRunner
+
+    from murano.cli import app
+
+    vault = tmp_path / "empty-vault"
+    data = tmp_path / "data"
+    vault.mkdir()
+    data.mkdir()
+    monkeypatch.setenv("MURANO_VAULT", str(vault))
+    monkeypatch.setenv("MURANO_DATA", str(data))
+
+    # Mock the venice plumbing so `index` doesn't try to reach the network.
+    with (
+        patch("murano.index.indexer.build_client", return_value=_FakeClient()),
+        patch("murano.index.indexer.resolve_models", return_value=_resolved()),
+        patch("murano.index.indexer.embed_texts", side_effect=_fake_embed_texts),
+    ):
+        result = CliRunner().invoke(app, ["index"])
+
+    assert result.exit_code == 0, result.output
+    assert "No Markdown files found in" in result.output
+    # Rich may soft-wrap the long temp path at console width, inserting
+    # whitespace anywhere in the path. Strip whitespace from both haystack
+    # and needle before checking — we only care that the configured path
+    # is *referenced* somewhere in the hint.
+    stripped_output = "".join(result.output.split())
+    stripped_vault = "".join(str(vault).split())
+    assert stripped_vault in stripped_output
+    assert "MURANO_VAULT=" in result.output
