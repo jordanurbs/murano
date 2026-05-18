@@ -693,25 +693,64 @@ def serve(
             "token automatically. Required for safe LAN binding."
         ),
     ),
+    auto_port: bool = typer.Option(
+        True,
+        "--auto-port/--no-auto-port",
+        help=(
+            "If the configured port is taken, scan forward (3000, 3001, ...) "
+            "for the next free port. On by default — disable to fail fast "
+            "if the configured port can't be bound."
+        ),
+    ),
+    auto_port_attempts: int = typer.Option(
+        10,
+        "--auto-port-attempts",
+        help="When --auto-port is on, how many consecutive ports to try.",
+    ),
 ) -> None:
     """Run the local web UI + REST API on http://localhost:3000."""
     import os as _os
 
     import uvicorn
 
-    from .api.scheduler import kill_port
+    from .api.scheduler import find_free_port, kill_port
 
     settings = load_settings()
-    bind_port = port if port is not None else settings.web_port
+    requested_port = port if port is not None else settings.web_port
 
     # If --api-token is provided, propagate it into the env so the reload
     # subprocess (and the UI route's lazy lookup) sees it.
     if api_token:
         _os.environ["MURANO_API_TOKEN"] = api_token
 
+    # Port resolution order:
+    #   1. --restart: kill whatever holds the requested port, then bind it.
+    #   2. --auto-port: scan forward starting at the requested port.
+    #   3. neither: try the requested port; if busy, uvicorn will error.
     if restart:
-        killed = kill_port(bind_port)
-        console.print(f"[dim]Killed {killed} process(es) on port {bind_port}.[/]")
+        killed = kill_port(requested_port)
+        console.print(f"[dim]Killed {killed} process(es) on port {requested_port}.[/]")
+        bind_port = requested_port
+    elif auto_port:
+        try:
+            bind_port, blocker_pid = find_free_port(
+                host, requested_port, attempts=auto_port_attempts
+            )
+        except RuntimeError as e:
+            err_console.print(str(e))
+            raise typer.Exit(code=1) from e
+        if bind_port != requested_port:
+            console.print(
+                f"[yellow]Port {requested_port} is busy"
+                + (f" (held by PID {blocker_pid})" if blocker_pid else "")
+                + f"; binding [bold]{bind_port}[/] instead. "
+                "Update any tools that point at the old port: "
+                f"[bold]http://{host}:{bind_port}/[/]"
+            )
+        else:
+            bind_port = requested_port
+    else:
+        bind_port = requested_port
 
     console.print(
         f"[green]Starting Murano[/] on [bold]http://{host}:{bind_port}[/]\n"

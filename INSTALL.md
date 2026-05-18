@@ -40,21 +40,42 @@ Or grab the release tarball once a v1 tag is cut.
 
 ---
 
-## 2. Install in a virtual environment
+## 2. Install
+
+Two paths — pick one.
+
+### 2a. Recommended: `pipx` (run `murano` from any directory, in any shell)
 
 ```bash
-uv venv                 # creates ./.venv with the right Python
-source .venv/bin/activate
-uv pip install -e .     # editable install — lets you `git pull` and rerun
+brew install pipx          # or: python -m pip install --user pipx
+pipx ensurepath            # adds ~/.local/bin to PATH — re-source ~/.zshrc
+pipx install -e .          # editable install — `git pull` updates the binary
 ```
 
-Expected output (last line):
+Sanity check from anywhere:
 
-```
-Installed N packages in <seconds>
+```bash
+cd /tmp && murano --version
+# murano 0.1.0
 ```
 
-Sanity check:
+This is the right choice for daily use. The `murano` binary stays on
+your `PATH` forever, no venv juggling. Murano's user data
+(`~/.murano/`, `~/murano/vault/`, OS keychain) is the same regardless
+of install method, so you can switch between pipx and venv installs
+without re-indexing.
+
+### 2b. Alternative: editable venv (developers + contributors)
+
+```bash
+uv venv && source .venv/bin/activate
+uv pip install -e ".[dev]"   # adds pytest + ruff for running the test suite
+```
+
+`murano` only works in shells where the venv is active. Useful if you
+want to hack on the code and run `pytest` against your edits.
+
+### Sanity check (either path)
 
 ```bash
 murano --version
@@ -215,7 +236,12 @@ murano serve --restart
 # INFO:     Uvicorn running on http://127.0.0.1:3000
 ```
 
-Open `http://localhost:3000` in your browser. You'll see:
+If port 3000 is busy, Murano automatically scans forward (3001, 3002, ...)
+and prints which port it actually bound to. To force-kill whatever holds
+3000 instead, use `--restart`. To disable the scan and fail fast, pass
+`--no-auto-port`.
+
+Open `http://localhost:3000` (or whichever port Murano reports) in your browser. You'll see:
 
 - **Chat** (`/`) — type a question, watch the answer stream with clickable
   citations, see the Sources footer.
@@ -396,7 +422,15 @@ murano tree rebuild   # tree was built against the old embeddings
 `lsof -ti :3000` should report whatever's holding it; kill that PID
 manually. The `--restart` flag only kills processes Murano can see via
 `lsof`; on stripped-down containers without `lsof`, you'll need to
-free the port yourself.
+free the port yourself. As a simpler alternative, just let
+`--auto-port` (the default) pick the next free port for you.
+
+### `command not found: murano`
+
+You installed with the venv path (2b) and your venv isn't activated in
+this shell. Either run `source ~/projects/murano/.venv/bin/activate`,
+or reinstall with `pipx install -e ~/projects/murano` (path 2a) to get
+the binary on your `PATH` globally.
 
 ### Browser shows "could not open file for [[file#heading]]" when clicking a citation
 

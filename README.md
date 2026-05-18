@@ -12,13 +12,17 @@ No backend service. No telemetry. By default the only outbound call is to `api.v
 
 ## Install
 
-Requires **Python 3.11+** and [`uv`](https://github.com/astral-sh/uv).
+Requires **Python 3.11+**. Two install paths:
 
 ```bash
 git clone https://github.com/jordanurbs/murano.git
 cd murano
-uv venv && source .venv/bin/activate
-uv pip install -e .
+
+# Recommended for daily use — `murano` works from any directory:
+pipx install -e .
+
+# Or for development (need pytest/ruff in scope):
+uv venv && source .venv/bin/activate && uv pip install -e ".[dev]"
 ```
 
 ## Quickstart

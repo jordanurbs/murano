@@ -164,6 +164,52 @@ def stop_background_workers(handles: SchedulerHandles) -> None:
         handles.stop_event.set()
 
 
+def find_free_port(host: str, start: int, *, attempts: int = 10) -> tuple[int, int | None]:
+    """Find a free port starting at `start`, scanning up to `attempts` ports.
+
+    Returns (bound_port, pid_of_first_conflict). `pid_of_first_conflict` is
+    the PID holding `start` (if anything was) so the caller can show the
+    operator why we moved. None when `start` itself was already free.
+
+    Raises RuntimeError after `attempts` consecutive busy ports — that's a
+    "you have bigger problems" situation; we don't want to scan 65k ports.
+    """
+    import socket
+
+    blocker_pid = _pid_on_port(start)
+    for offset in range(attempts):
+        candidate = start + offset
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                s.bind((host, candidate))
+            except OSError:
+                continue
+            return candidate, (blocker_pid if offset > 0 else None)
+    raise RuntimeError(
+        f"No free port in range [{start}, {start + attempts - 1}] on {host!r}. "
+        "Free up a port and retry, or pass --port <N> with a different starting value."
+    )
+
+
+def _pid_on_port(port: int) -> int | None:
+    """Return the PID currently bound to `port`, or None. macOS/Linux only."""
+    import platform
+    import subprocess
+
+    if platform.system() not in {"Darwin", "Linux"}:
+        return None
+    try:
+        out = subprocess.run(
+            ["lsof", "-ti", f":{port}"],
+            check=False, capture_output=True, text=True, timeout=2,
+        )
+        pids = [int(p) for p in out.stdout.strip().splitlines() if p.strip().isdigit()]
+        return pids[0] if pids else None
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+
+
 def kill_port(port: int) -> int:
     """Best-effort port-killer for `murano serve --restart` (and scripts/dev.sh).
 
